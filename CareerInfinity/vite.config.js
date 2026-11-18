@@ -37,6 +37,7 @@ export default defineConfig(({ mode }) => {
         "/certificates": { target: backendTarget, changeOrigin: true },
         "/settings": { target: backendTarget, changeOrigin: true },
         "/feedback": { target: backendTarget, changeOrigin: true },
+        "/notifications": { target: backendTarget, changeOrigin: true },
       },
     },
   };

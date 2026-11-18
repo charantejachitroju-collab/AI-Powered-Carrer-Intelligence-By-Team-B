@@ -47,12 +47,22 @@ The Firebase web settings in the existing sign-in page are public client
 configuration, not server credentials. Restrict its API key and authorized
 domains in Firebase/Google Cloud. `FIREBASE_PROJECT_ID` must match that
 Firebase app. The API loads settings from a local `.env` file as well as the
-process environment. Copy `.env.example` to `.env`, then set `LLM_API_KEY`, `LLM_API_URL`,
-and `LLM_MODEL` for your OpenAI-compatible provider to enable AI interview
-questions and answer feedback. Keep the key on the server and out of source
-control. Without a key, the interview page explains the required setup and
-question generation returns a clear configuration error; it does not silently
-substitute demo questions.
+process environment. Every person cloning this repository should copy
+`.env.example` to their own `.env`; `.env` is ignored by Git and must never be
+committed or shared. The app runs without an AI key, but AI interview questions
+and feedback need each user to configure their own provider key on the backend.
+
+For OpenAI, set `OPENAI_API_KEY` and use the OpenAI defaults in `.env.example`.
+For Groq, set `LLM_API_KEY`, change `LLM_API_URL` to
+`https://api.groq.com/openai/v1/chat/completions`, and set `LLM_MODEL` to a
+model enabled for that account. The key, URL, and model must belong to the same
+provider. Restart `python app.py` after changing `.env`. Never put provider keys
+in `VITE_*` variables, frontend code, or GitHub. If multiple people need to use
+one shared hosted app, configure the key only in the backend host's secret
+settings and add suitable usage limits; do not distribute the key to clients.
+Without a key, the interview page explains the required setup and AI question
+generation reports a configuration error rather than silently substituting
+demo questions.
 
 ## Dashboard modules
 
@@ -70,6 +80,7 @@ The responsive React Router sidebar includes:
 10. Certificates earned by the account and editable credential recommendations.
 11. Profile, target role, location, notification, and theme settings.
 12. Help/FAQ and persisted feedback.
+13. Notifications with per-account storage, search, category/read filters, sorting, pagination, preferences, 100 sample role/package alerts, and optional live Adzuna job listings.
 
 The frontend is in `src/` and uses React, Tailwind CSS, Recharts, Lucide icons,
 and React Router. The former `/skills` dashboard URL redirects to Roadmap; the
@@ -116,6 +127,13 @@ The new dashboard endpoints use the same Firebase ID-token verification:
 | `GET /certificates` | Earned credentials and recommended catalog |
 | `GET/PATCH /settings` | User-specific profile and preferences |
 | `POST /feedback` | Save authenticated user feedback |
+| `GET /notifications` | List the signed-in user's notifications with category/status/search/sort filters and offset pagination |
+| `GET /notifications/jobs/provider-status` | Check whether both server-side Adzuna credentials are configured (returns booleans only) |
+| `POST /notifications/jobs/refresh` | Fetch current job listings from Adzuna when configured; otherwise use the public eGig feed |
+| `POST /notifications/sample-jobs/seed` | Add the signed-in user's 100 role-and-package sample alerts once |
+| `PATCH /notifications/{id}/read`, `POST /notifications/read-all` | Mark one or all of the signed-in user's notifications as read |
+| `DELETE /notifications/{id}` | Delete a notification owned by the signed-in user |
+| `GET/PATCH /notifications/preferences` | Read and save the signed-in user's notification preferences |
 
 Roadmap progress percentages count completed learning resources. Hours are
 summed from the catalog's estimates; the finish date uses the requested weekly
@@ -134,6 +152,18 @@ API keeps its established synchronous SQLite access patterns and per-user
 ownership checks. Uploaded files are stored in the private SQLite database.
 Set `CAREERINFINITY_DB_PATH` to an absolute path on persistent storage in a
 hosted environment and protect/back up that database.
+
+## Smart job notification center
+
+The current project has **no Supabase client or Supabase project configuration**. Its existing identity is Firebase Authentication and its database is SQLite. Notifications use the existing Firebase-verified API and scope saved records to the verified Firebase UID. Migration `003_notification_job_details.sql` removes old fictional records and stores listing details. The page polls the API every 30 seconds while visible; it does not use Supabase Realtime.
+
+The notification screen merges live listings from Adzuna (when configured), eGig, Arbeitnow, and Remotive. Add `ADZUNA_APP_ID` and `ADZUNA_APP_KEY` to the backend's ignored local `.env` to enable Adzuna; each teammate needs their own credentials. The app key stays on the server. If no live source returns jobs, the page can show the requested **100 sample alerts**, clearly marked as samples. Sample salary ranges are illustrative, not employer offers.
+
+Each live card keeps its provider name and original application URL. Adzuna searches use your configured country and preferred roles/locations; eGig is queried per preferred role; Arbeitnow and Remotive feeds are cached to limit repeated requests. Arbeitnow is primarily EU listings; Remotive focuses on remote jobs and asks integrations to credit Remotive and link through to the original posting. Their coverage and geographic fit therefore vary. See [Adzuna's API docs](https://developer.adzuna.com/docs/search), [eGig's API and usage rules](https://egig.in/developers), [Arbeitnow's API docs](https://www.arbeitnow.com/blog/job-board-api) and [terms](https://www.arbeitnow.com/terms), and [Remotive's API docs](https://github.com/remotive-com/remote-jobs-api).
+
+The existing Job Recommendations page recommends roles, learning resources, and project ideas; it is not a live job feed. Placement drives remain separately managed. The app creates CareerInfinity activity notifications when a resume analysis finishes and when a user saves interest in a drive (which is not an employer application). It does not ingest employer application/interview updates. Email preference is stored, but toggling it does not send email.
+
+`migrations/002_notifications_supabase.sql` is a separate Supabase SQL Editor migration artifact with user-scoped RLS, restrictive read-status updates, indexes, preferences, and Realtime publication membership. It is **not applied or used by this Firebase/SQLite application**. Supabase RLS policies depend on Supabase Auth user UUIDs; connecting them while retaining the current Firebase-only sign-in requires a deliberate identity bridge or migration that preserves per-user security. Do not paste a Supabase service-role key into frontend settings or this repository.
 
 ## Editable market and learning data
 

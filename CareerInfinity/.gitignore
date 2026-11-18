@@ -8,5 +8,6 @@ __pycache__/
 !.env.example
 node_modules/
 dist/
+run_logs/
 *.sqlite3
 *.db

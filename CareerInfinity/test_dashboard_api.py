@@ -22,6 +22,9 @@ def create_docx(text="Data analyst. Python SQL Excel Power BI data analysis. Edu
 def setup_client(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "DATABASE_PATH", str(tmp_path / "dashboard.sqlite3"))
     monkeypatch.setattr(app, "authenticated_uid", lambda _authorization: "dashboard-test-user")
+    monkeypatch.delenv("ADZUNA_APP_ID", raising=False)
+    monkeypatch.delenv("ADZUNA_APP_KEY", raising=False)
+    monkeypatch.setattr(app, "_PUBLIC_JOB_FEED_CACHE", {})
     client = TestClient(app.app, raise_server_exceptions=False)
     return client
 
@@ -118,6 +121,9 @@ def test_resume_upload_and_document_download_compare_delete(monkeypatch, tmp_pat
 
     assert listing.status_code == 200
     assert len(listing.json()["documents"]) == 2
+    resume_notice = client.get("/notifications?category=ai_insight&limit=10")
+    assert resume_notice.status_code == 200
+    assert any(item["notification_type"] == "resume_analysis" and not item["is_demo"] for item in resume_notice.json()["notifications"])
     assert comparison.status_code == 200
     assert len(comparison.json()["versions"]) == 2
     assert download.status_code == 200
@@ -477,6 +483,8 @@ def test_drives_filters_applications_and_admin_crud(monkeypatch, tmp_path):
     assert drives.status_code == 200
     assert any(item["id"] == drive_id for item in drives.json()["drives"])
     assert application.status_code == 200
+    application_notice = client.get("/notifications?category=application&limit=10")
+    assert any(item["notification_type"] == "placement_drive_interest" and "not confirmation" in item["message"] for item in application_notice.json()["notifications"])
     assert updated.status_code == 200
     assert deleted.status_code == 200
 
@@ -492,3 +500,360 @@ def test_certificates_and_feedback_are_user_scoped(monkeypatch, tmp_path):
     assert certificates.json()["catalog"]
     assert feedback.status_code == 200
     assert invalid.status_code == 400
+
+
+def test_notifications_pagination_filters_read_delete_and_preferences(monkeypatch, tmp_path):
+    client = setup_client(monkeypatch, tmp_path)
+
+    empty = client.get("/notifications")
+    connection = app.get_database()
+    with connection:
+        now = app.datetime.now(app.timezone.utc)
+        for sequence in range(100):
+            category = "internship" if sequence % 5 == 0 else "job_match" if sequence % 5 == 1 else "ai_insight"
+            title = f"Test Python notification {sequence}" if sequence % 7 == 0 else f"Test notification {sequence}"
+            connection.execute(
+                """INSERT INTO notifications
+                (id, uid, title, message, category, notification_type, is_read, created_at, is_demo)
+                VALUES (?, 'dashboard-test-user', ?, 'Test fixture', ?, 'test_fixture', ?, ?, 0)""",
+                (f"test-notification-{sequence}", title, category, 1 if sequence % 4 == 0 else 0, (now - timedelta(minutes=sequence)).isoformat()),
+            )
+    connection.close()
+    first = client.get("/notifications?limit=10&offset=0")
+    second = client.get("/notifications?limit=10&offset=10")
+    internships = client.get("/notifications?category=internship&limit=50")
+    unread = client.get("/notifications?status=unread&limit=50")
+    searched = client.get("/notifications?search=Python&limit=50")
+
+    assert empty.status_code == 200 and empty.json()["total"] == 0
+    assert first.status_code == 200 and len(first.json()["notifications"]) == 10
+    assert first.json()["total"] == 100 and first.json()["has_more"] is True
+    assert second.status_code == 200 and len(second.json()["notifications"]) == 10
+    assert not set(item["id"] for item in first.json()["notifications"]) & set(item["id"] for item in second.json()["notifications"])
+    assert internships.json()["total"] == 20
+    assert all(item["category"] == "internship" and not item["is_demo"] for item in internships.json()["notifications"])
+    assert unread.json()["unread"] == 75
+    assert searched.json()["total"] >= 1
+
+    notification_id = unread.json()["notifications"][0]["id"]
+    assert client.patch(f"/notifications/{notification_id}/read").status_code == 200
+    title = unread.json()["notifications"][0]["title"]
+    assert client.get("/notifications", params={"search": title}).json()["notifications"][0]["is_read"] is True
+    preferences = client.patch("/notifications/preferences", json={"minimum_match_percentage": 82, "email_notifications": True})
+    assert preferences.status_code == 200
+    assert client.get("/notifications/preferences").json()["minimum_match_percentage"] == 82
+    assert client.get("/notifications/preferences").json()["email_notifications"] is True
+
+    monkeypatch.setattr(app, "authenticated_uid", lambda _authorization: "other-notification-user")
+    assert client.get("/notifications").json()["total"] == 0
+    assert client.patch(f"/notifications/{notification_id}/read").status_code == 404
+    assert client.delete(f"/notifications/{notification_id}").status_code == 404
+    assert client.get("/notifications/preferences").json()["email_notifications"] is False
+
+    monkeypatch.setattr(app, "authenticated_uid", lambda _authorization: "dashboard-test-user")
+    assert client.post("/notifications/read-all").json()["updated"] == 74
+    assert client.get("/notifications?status=unread").json()["total"] == 0
+    assert client.delete(f"/notifications/{notification_id}").status_code == 200
+
+
+def test_egig_job_normalization_keeps_source_fields_and_salary_label():
+    ad = {
+        "id": 123, "title": "Python Developer", "posted_at": "2026-11-12T10:15:00Z",
+        "url": "http://egig.in/jobs/123", "company": {"name": "Example employer", "logo": "https://images.example.org/logo.png"},
+        "location": {"city": "Hyderabad", "state": "Telangana"},
+        "salary": {"text": "₹5–7 LPA", "currency": "INR", "period": "year"},
+        "employment_type": "Full-time", "duration": "6 months",
+        "experience": "0–2 years", "eligibility": "B.Tech degree required.",
+        "description": "Python and SQL role. 0-2 years experience. B.Tech degree required. Hybrid work.",
+    }
+    normalized = app._normalise_egig_job(ad, "Python SQL B.Tech", {}, {"preferred_roles": [], "preferred_locations": []})
+
+    assert normalized["title"] == "Python Developer"
+    assert normalized["company_name"] == "Example employer"
+    assert normalized["location"] == "Hyderabad, Telangana"
+    assert normalized["salary_label"] == "₹5–7 LPA"
+    assert normalized["employment_type"] == "Full-time"
+    assert normalized["work_mode"] == "Hybrid"
+    assert normalized["duration"] == "6 months"
+    assert normalized["experience"] == "0–2 years"
+    assert normalized["qualification"] == "B.Tech degree required."
+    assert normalized["job_url"] == "https://egig.in/jobs/123"
+    assert normalized["posted_at"] == "2026-11-12T10:15:00+00:00"
+    assert normalized["match_percentage"] is not None
+    assert "Python" in normalized["matching_skills"]
+
+
+def test_adzuna_normalization_marks_predicted_pay_as_estimated():
+    ad = {
+        "id": 77, "title": "Python Developer", "created": "2026-11-12T10:15:00Z",
+        "redirect_url": "https://www.adzuna.in/details/77", "company": {"display_name": "Example employer"},
+        "location": {"display_name": "Hyderabad, Telangana"}, "salary_min": 500000,
+        "salary_max": 700000, "salary_is_predicted": "1", "contract_time": "full_time",
+        "description": "Python and SQL role. 0-2 years experience. B.Tech degree required. Hybrid work.",
+    }
+    normalized = app._normalise_adzuna_job(ad, "Python SQL B.Tech", {}, {"preferred_roles": [], "preferred_locations": []})
+    assert normalized["source"] == "Adzuna"
+    assert normalized["company_name"] == "Example employer"
+    assert normalized["location"] == "Hyderabad, Telangana"
+    assert normalized["salary_min"] == 500000 and normalized["salary_max"] == 700000
+    assert normalized["salary_label"] == "₹500,000–₹700,000 (estimated by Adzuna)"
+    assert normalized["employment_type"] == "Full-time"
+    assert normalized["job_url"] == "https://www.adzuna.in/details/77"
+    assert normalized["posted_at"] == "2026-11-12T10:15:00+00:00"
+
+
+def test_adzuna_normalization_extracts_details_embedded_in_published_description():
+    ad = {
+        "id": 78, "title": "SDE 3 Full Stack Engineer", "created": "2026-11-13T08:00:00Z",
+        "redirect_url": "https://www.adzuna.in/details/78",
+        "company": {"display_name": "Weekday AI"}, "location": {"display_name": "India"},
+        "contract_time": "full_time", "salary_is_predicted": "1",
+        "description": "Salary range: Rs 2700000 - Rs 4500000 (ie INR 27 - 45 LPA) Experience: 4 years Location: Bangalore JobType: full-time Eligibility: Bachelor's degree Apply by: 2026-12-01 Work mode: hybrid. Build scalable applications with JavaScript and React.",
+    }
+    normalized = app._normalise_adzuna_job(ad, "JavaScript React SQL", {}, {"preferred_roles": [], "preferred_locations": []})
+
+    assert normalized["salary_label"] == "Rs 2700000 - Rs 4500000 (ie INR 27 - 45 LPA)"
+    assert normalized["salary_min"] is None and normalized["salary_max"] is None
+    assert normalized["experience"] == "4 years"
+    assert normalized["location"] == "Bangalore"
+    assert normalized["employment_type"] == "Full-time"
+    assert normalized["qualification"] == "Bachelor's degree"
+    assert normalized["application_deadline"] == "2026-12-01T00:00:00+00:00"
+    assert normalized["work_mode"] == "Hybrid"
+
+
+def test_adzuna_uses_labeled_role_package_estimate_when_listing_omits_salary():
+    ad = {
+        "id": 79, "title": "Senior Backend Developer", "created": "2026-11-13T08:00:00Z",
+        "redirect_url": "https://www.adzuna.in/details/79", "company": {"display_name": "Example employer"},
+        "location": {"display_name": "Bengaluru"}, "salary_is_predicted": "0",
+        "description": "Build backend services in Python.",
+    }
+    normalized = app._normalise_adzuna_job(ad, "Python backend", {}, {"preferred_roles": [], "preferred_locations": []})
+
+    assert normalized["salary_label"] == "₹4–15 LPA (project estimate)"
+    assert app._estimated_package_for_role("Module Lead", "Copilot Studio AI engineering") == "₹6–18 LPA (project estimate)"
+
+
+def test_adzuna_refresh_switches_from_samples_to_live_listing(monkeypatch, tmp_path):
+    client = setup_client(monkeypatch, tmp_path)
+    assert client.post("/notifications/sample-jobs/seed").json()["total"] == 100
+    monkeypatch.setenv("ADZUNA_APP_ID", "test-app-id")
+    monkeypatch.setenv("ADZUNA_APP_KEY", "test-app-key")
+    monkeypatch.setenv("ADZUNA_COUNTRY", "in")
+    payload = {"results": [{
+        "id": 991, "title": "Python Developer", "created": "2026-11-12T10:15:00Z",
+        "redirect_url": "https://www.adzuna.in/details/991", "company": {"display_name": "Live employer"},
+        "location": {"display_name": "Pune, Maharashtra"}, "salary_is_predicted": "0",
+        "salary_min": 500000, "salary_max": 700000, "contract_time": "full_time",
+        "description": "Python and SQL role. Hybrid work.",
+    }]}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def get(self, _url, **_kwargs): return FakeResponse()
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", FakeAsyncClient)
+    refreshed = client.post("/notifications/jobs/refresh")
+    status = client.get("/notifications/jobs/provider-status")
+    listings = client.get("/notifications?limit=50")
+
+    assert refreshed.status_code == 200 and "Adzuna" in refreshed.json()["providers"]
+    assert refreshed.json()["created"] == 1
+    assert status.json() == {"provider": "Adzuna + eGig + Arbeitnow + Remotive", "providers": ["Adzuna", "eGig", "Arbeitnow", "Remotive"], "adzuna_configured": True, "app_id_present": True, "app_key_present": True}
+    assert listings.json()["total"] == 1
+    listing = listings.json()["notifications"][0]
+    assert listing["job"]["source"] == "Adzuna"
+    assert listing["job"]["salary_label"].startswith("₹500,000–₹700,000")
+
+
+def test_adzuna_provider_status_never_returns_credentials(monkeypatch, tmp_path):
+    client = setup_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("ADZUNA_APP_ID", "private-app-id")
+    monkeypatch.setenv("ADZUNA_APP_KEY", "private-app-key")
+    response = client.get("/notifications/jobs/provider-status")
+    assert response.status_code == 200
+    assert "private-app-id" not in response.text and "private-app-key" not in response.text
+    assert response.json()["adzuna_configured"] is True
+
+
+def test_refresh_merges_adzuna_egig_arbeitnow_and_remotive(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "DATABASE_PATH", str(tmp_path / "dashboard.sqlite3"))
+    monkeypatch.setattr(app, "authenticated_uid", lambda _authorization: "multi-source-user")
+    monkeypatch.setattr(app, "_PUBLIC_JOB_FEED_CACHE", {})
+    monkeypatch.setenv("ADZUNA_APP_ID", "test-app-id")
+    monkeypatch.setenv("ADZUNA_APP_KEY", "test-app-key")
+    monkeypatch.setenv("ADZUNA_COUNTRY", "in")
+
+    payloads = {
+        "api.adzuna.com": {"results": [{
+            "id": 701, "title": "Python Developer", "created": "2026-11-13T08:00:00Z",
+            "redirect_url": "https://www.adzuna.in/details/701", "company": {"display_name": "Adzuna Labs"},
+            "location": {"display_name": "Bengaluru"}, "salary_is_predicted": "0", "contract_time": "full_time",
+            "description": "Python API developer with SQL experience.",
+        }]},
+        "egig.in": {"jobs": [{
+            "id": 702, "title": "Data Analyst", "company": "eGig Labs", "location": "Hyderabad",
+            "url": "https://egig.in/jobs/702", "type": "full_time", "description": "Analyze data with Python and SQL.",
+        }]},
+        "www.arbeitnow.com": {"data": [{
+            "slug": "arbeitnow-python-703", "title": "Python Developer", "company_name": "Arbeit Labs",
+            "location": "Berlin, Germany", "url": "https://www.arbeitnow.com/view/python-703", "job_types": ["full_time"],
+            "created_at": 1794557700, "tags": ["Python"], "description": "Build Python services.",
+        }]},
+        "remotive.com": {"jobs": [{
+            "id": 704, "title": "Remote Data Analyst", "company_name": "Remotive Labs",
+            "candidate_required_location": "Worldwide", "url": "https://remotive.com/remote-jobs/data/analyst-704",
+            "job_type": "full_time", "publication_date": "2026-11-13T08:00:00", "salary": "$70,000 - $90,000",
+            "category": "Data", "description": "Analyze data with Python and SQL.",
+        }]},
+    }
+
+    class FakeResponse:
+        status_code = 200
+        def __init__(self, body): self.body = body
+        def json(self): return self.body
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def get(self, url, **_kwargs):
+            host = app.urlsplit(url).hostname
+            return FakeResponse(payloads[host])
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", FakeAsyncClient)
+    result = asyncio.run(app.refresh_live_jobs(None))
+    connection = app.get_database()
+    try:
+        sources = {row[0] for row in connection.execute("SELECT DISTINCT source FROM notification_job_details").fetchall()}
+        links = {row[0] for row in connection.execute("SELECT job_url FROM notification_job_details").fetchall()}
+    finally:
+        connection.close()
+
+    assert result["providers"] == ["Adzuna", "eGig", "Arbeitnow", "Remotive"]
+    assert result["jobs"] == 4
+    assert sources == {"Adzuna", "eGig", "Arbeitnow", "Remotive"}
+    assert any(url.startswith("https://remotive.com/") for url in links)
+    assert any(url.startswith("https://www.arbeitnow.com/") for url in links)
+
+
+def test_egig_refresh_persists_real_listing_fields_and_deduplicates(monkeypatch, tmp_path):
+    client = setup_client(monkeypatch, tmp_path)
+    payload = {"jobs": [{
+        "id": 811, "title": "Python Developer Intern", "posted": "2026-11-12T10:15:00Z",
+        "url": "https://egig.in/jobs/811", "company": "Test employer", "listed_by": "eGig",
+        "location": "Bengaluru, Karnataka", "remote": True, "type": "Internship",
+        "pay": "₹10,000–₹15,000 per month", "duration": "3 months",
+    }]}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def get(self, url, **_kwargs):
+            host = app.urlsplit(url).hostname
+            if host == "www.arbeitnow.com":
+                return FakeResponse({"data": []})
+            if host == "remotive.com":
+                return FakeResponse({"jobs": []})
+            return FakeResponse()
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", FakeAsyncClient)
+    first = client.post("/notifications/jobs/refresh")
+    second = client.post("/notifications/jobs/refresh")
+    listing = client.get("/notifications?category=internship&limit=10")
+
+    assert first.status_code == 200 and first.json()["created"] == 1
+    assert second.status_code == 200 and second.json()["created"] == 0 and second.json()["updated"] == 1
+    record = listing.json()["notifications"][0]
+    assert record["company_name"] == "Test employer"
+    assert record["job"]["source"] == "eGig"
+    assert record["job"]["location"] == "Bengaluru, Karnataka"
+    assert record["job"]["salary_label"] == "₹10,000–₹15,000 per month"
+    assert record["job"]["job_url"] == "https://egig.in/jobs/811"
+    assert record["job"]["employment_type"] == "Internship"
+    assert record["job"]["work_mode"] == "Remote"
+    assert record["job"]["duration"] == "3 months"
+    assert record["job"]["listing_source"] == "eGig"
+    assert record["job"]["salary_period"] is None
+
+
+def test_egig_link_validator_rejects_external_or_script_urls():
+    assert app._safe_egig_url("https://egig.in/jobs/123") == "https://egig.in/jobs/123"
+    assert app._safe_egig_url("https://evil.example/jobs/123") is None
+    assert app._safe_egig_url("javascript:alert(1)") is None
+
+
+def test_arbeitnow_and_remotive_normalizers_preserve_source_apply_links():
+    preferences = {"preferred_roles": [], "preferred_locations": []}
+    arbeitnow = app._normalise_arbeitnow_job({
+        "slug": "python-dev-berlin", "title": "Python Developer", "company_name": "Berlin Labs",
+        "location": "Berlin, Germany", "remote": False,
+        "url": "https://www.arbeitnow.com/view/python-dev-berlin", "tags": ["Python", "Django"],
+        "job_types": ["full_time"], "created_at": 1794557700, "description": "Build Python APIs.",
+    }, "Python Django", {}, preferences)
+    remotive = app._normalise_remotive_job({
+        "id": 402, "title": "Remote Python Developer", "company_name": "Remote Labs",
+        "candidate_required_location": "Worldwide", "url": "https://remotive.com/remote-jobs/software-dev/remote-python-developer-402",
+        "job_type": "full_time", "publication_date": "2026-11-13T08:00:00", "salary": "$70,000 - $90,000",
+        "category": "Software Development", "description": "Build Python APIs.",
+    }, "Python Django", {}, preferences)
+
+    assert arbeitnow["source"] == "Arbeitnow"
+    assert arbeitnow["job_url"] == "https://www.arbeitnow.com/view/python-dev-berlin"
+    assert arbeitnow["employment_type"] == "Full-time"
+    assert arbeitnow["posted_at"].startswith("2026-")
+    assert remotive["source"] == "Remotive"
+    assert remotive["job_url"].startswith("https://remotive.com/")
+    assert remotive["work_mode"] == "Remote"
+    assert remotive["salary_currency"] == "USD"
+    assert remotive["listing_source"] == "Remotive"
+
+
+def test_notification_job_schema_migrations_are_repeatable(monkeypatch, tmp_path):
+    setup_client(monkeypatch, tmp_path)
+    database_path = str(tmp_path / "dashboard.sqlite3")
+    first = app.get_database()
+    first.close()
+    app._SCHEMA_PATHS.discard(database_path)
+
+    second = app.get_database()
+    columns = {row[1] for row in second.execute("PRAGMA table_info(notification_job_details)")}
+    second.close()
+
+    assert {"salary_label", "duration", "listing_source"}.issubset(columns)
+
+
+def test_sample_job_notifications_seed_100_role_package_examples(monkeypatch, tmp_path):
+    client = setup_client(monkeypatch, tmp_path)
+
+    seeded = client.post("/notifications/sample-jobs/seed")
+    repeated = client.post("/notifications/sample-jobs/seed")
+    result = client.get("/notifications?limit=50")
+    second_page = client.get("/notifications?limit=50&offset=50")
+    records = result.json()["notifications"] + second_page.json()["notifications"]
+
+    assert seeded.status_code == 200
+    assert seeded.json()["created"] == 100 and seeded.json()["total"] == 100
+    assert repeated.json()["created"] == 0 and repeated.json()["already_seeded"] is True
+    assert result.json()["total"] == 100
+    assert all(item["is_demo"] and item["job"]["source"] == "Sample data" for item in records)
+    assert all(item["job"]["salary_label"].endswith("(sample)") for item in records)
+    assert len({item["title"].split(" ", 1)[1] for item in records}) > 10
+    assert all(item["job"]["job_url"] is None and item["company_name"] is None for item in records)

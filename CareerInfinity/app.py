@@ -15,7 +15,7 @@ import uuid
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from zipfile import BadZipFile
 
 # Use the operating system certificate store for outbound TLS. On Windows,
@@ -74,6 +74,8 @@ MARKET_DATA_PATH = APP_DIR / "market_data.json"
 CERTIFICATIONS_PATH = APP_DIR / "certifications.json"
 ROADMAPS_PATH = APP_DIR / "roadmaps.json"
 ROADMAP_PROGRESS_MIGRATION_PATH = APP_DIR / "migrations" / "001_user_progress.sql"
+NOTIFICATIONS_SQLITE_MIGRATION_PATH = APP_DIR / "migrations" / "002_notifications.sqlite.sql"
+NOTIFICATION_JOB_DETAILS_MIGRATION_PATH = APP_DIR / "migrations" / "003_notification_job_details.sql"
 MAX_PROOF_SIZE = 5 * 1024 * 1024
 CAREER_INTELLIGENCE_CACHE_TTL_SECONDS = 30
 CAREER_INTELLIGENCE_CACHE_MAX_ENTRIES = 128
@@ -480,6 +482,18 @@ def get_database():
             migration_connection = sqlite3.connect(db_path, timeout=10)
             try:
                 migration_connection.executescript(migration_sql)
+                notification_migration = NOTIFICATIONS_SQLITE_MIGRATION_PATH.read_text(encoding="utf-8")
+                migration_connection.executescript(notification_migration)
+                job_details_migration = NOTIFICATION_JOB_DETAILS_MIGRATION_PATH.read_text(encoding="utf-8")
+                migration_connection.executescript(job_details_migration)
+                detail_columns = {row[1] for row in migration_connection.execute("PRAGMA table_info(notification_job_details)")}
+                if "salary_label" not in detail_columns:
+                    migration_connection.execute("ALTER TABLE notification_job_details ADD COLUMN salary_label TEXT")
+                if "duration" not in detail_columns:
+                    migration_connection.execute("ALTER TABLE notification_job_details ADD COLUMN duration TEXT")
+                if "listing_source" not in detail_columns:
+                    migration_connection.execute("ALTER TABLE notification_job_details ADD COLUMN listing_source TEXT")
+                migration_connection.commit()
             finally:
                 migration_connection.close()
         except (OSError, sqlite3.Error):
@@ -1194,7 +1208,7 @@ async def analyze_resume_upload(
 
 
 async def review_top_role_matches(resume_text, matches):
-    api_key = os.environ.get("LLM_API_KEY", "").strip()
+    api_key = (os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key or not matches:
         return
     api_url = os.environ.get("LLM_API_URL", "https://api.openai.com/v1/chat/completions")
@@ -1436,6 +1450,15 @@ async def analyze_resume_dashboard(
                     analysis["resume_score"], json.dumps(saved_analysis),
                     json.dumps(role_matching), now,
                 ),
+            )
+            best_role = role_matching.get("roles", [{}])[0].get("role") if role_matching.get("roles") else None
+            analysis_message = f"Your resume analysis is ready with a score of {analysis['resume_score']}/100."
+            if best_role:
+                analysis_message += f" Your highest estimated role match is {best_role}. Review your skills and matches."
+            create_user_notification(
+                connection, uid, "Your resume analysis is complete", analysis_message,
+                "ai_insight", "resume_analysis", action_url="/career",
+                dedupe_key=f"resume-analysis:{document_id}",
             )
         return {
             "document_id": document_id,
@@ -2415,6 +2438,926 @@ def interview_report(
         connection.close()
 
 
+NOTIFICATION_DEFAULT_PREFERENCES = {
+    "job_matches": True, "internships": True, "application_updates": True,
+    "interview_reminders": True, "deadline_reminders": True, "ai_insights": True,
+    "email_notifications": False, "in_app_notifications": True,
+    "preferred_roles": [], "preferred_locations": [], "work_modes": ["Remote", "Hybrid", "On-site"],
+    "job_types": ["Internship", "Full-time", "Part-time", "Contract"], "minimum_match_percentage": 70,
+}
+
+def notification_record(row):
+    job = None
+    if "source" in row.keys() and row["source"]:
+        salary_label = row["salary_label"]
+        if not salary_label and row["salary_min"] is None and row["salary_max"] is None:
+            salary_label = _estimated_package_for_role(row["title"], row["description"])
+        job = {
+            "source": row["source"], "external_job_id": row["external_job_id"],
+            "company_logo": row["company_logo"], "location": row["location"],
+            "salary_min": row["salary_min"], "salary_max": row["salary_max"],
+            "salary_label": salary_label, "salary_currency": row["salary_currency"], "salary_period": row["salary_period"],
+            "duration": row["duration"],
+            "listing_source": row["listing_source"],
+            "employment_type": row["employment_type"], "work_mode": row["work_mode"],
+            "experience": row["experience"], "qualification": row["qualification"],
+            "job_url": row["job_url"], "posted_at": row["posted_at"],
+            "application_deadline": row["application_deadline"], "description": row["description"],
+            "required_skills": json.loads(row["required_skills_json"] or "[]"),
+            "matching_skills": json.loads(row["matching_skills_json"] or "[]"),
+            "missing_skills": json.loads(row["missing_skills_json"] or "[]"),
+            "match_explanation": row["match_explanation"], "last_seen_at": row["last_seen_at"],
+        }
+    result = {
+        "id": row["id"], "title": row["title"], "message": row["message"],
+        "category": row["category"], "notification_type": row["notification_type"],
+        "job_id": row["job_id"], "company_name": row["company_name"],
+        "match_percentage": row["match_percentage"], "is_read": bool(row["is_read"]),
+        "action_url": row["action_url"], "created_at": row["created_at"],
+        "is_demo": bool(row["is_demo"]), "job": job,
+    }
+    return result
+
+
+def create_user_notification(
+    connection, uid, title, message, category, notification_type, *,
+    action_url=None, company_name=None, job_id=None, match_percentage=None, dedupe_key,
+):
+    """Persist an app-owned event after checking the user's category preference."""
+    preference_row = connection.execute(
+        "SELECT preferences_json FROM notification_preferences WHERE uid = ?", (uid,)
+    ).fetchone()
+    preferences = {**NOTIFICATION_DEFAULT_PREFERENCES, **(json.loads(preference_row["preferences_json"]) if preference_row else {})}
+    preference_key = {
+        "job_match": "job_matches", "internship": "internships", "application": "application_updates",
+        "interview": "interview_reminders", "deadline": "deadline_reminders", "ai_insight": "ai_insights",
+    }[category]
+    if not preferences.get("in_app_notifications", True) or not preferences.get(preference_key, True):
+        return False
+    cursor = connection.execute(
+        """INSERT OR IGNORE INTO notifications
+        (id, uid, title, message, category, notification_type, job_id, company_name,
+         match_percentage, is_read, action_url, created_at, is_demo, dedupe_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?)""",
+        (str(uuid.uuid4()), uid, title[:200], message[:4000], category, notification_type,
+         job_id, company_name, match_percentage, action_url, datetime.now(timezone.utc).isoformat(), dedupe_key),
+    )
+    return cursor.rowcount > 0
+
+
+def _clean_job_text(value):
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value)).strip()
+
+
+def _safe_provider_url(value, *domains):
+    if not isinstance(value, str) or len(value) > 2000:
+        return None
+    value = value.strip()
+    parts = urlsplit(value)
+    host = (parts.hostname or "").casefold()
+    if parts.scheme not in {"http", "https"} or not any(host == domain or host.endswith("." + domain) for domain in domains):
+        return None
+    return parts._replace(scheme="https", netloc=host).geturl()
+
+
+def _safe_egig_url(value):
+    if isinstance(value, str) and value.strip().startswith("/") and not value.strip().startswith("//"):
+        value = urljoin("https://egig.in", value.strip())
+    return _safe_provider_url(value, "egig.in")
+
+
+def _safe_arbeitnow_url(value):
+    return _safe_provider_url(value, "arbeitnow.com", "arbeitnow.co.uk")
+
+
+def _safe_remotive_url(value):
+    return _safe_provider_url(value, "remotive.com")
+
+
+def _safe_adzuna_url(value):
+    if not isinstance(value, str) or len(value) > 2000:
+        return None
+    parts = urlsplit(value.strip())
+    host = (parts.hostname or "").casefold()
+    allowed = ("adzuna.com", "adzuna.co.uk", "adzuna.in", "adzuna.co.in", "adzuna.com.au", "adzuna.co.nz", "adzuna.co.za")
+    if parts.scheme not in {"http", "https"} or not any(host == domain or host.endswith("." + domain) for domain in allowed):
+        return None
+    return parts._replace(scheme="https", netloc=host).geturl()
+
+
+def _first_job_value(*values):
+    return next((value for value in values if value is not None and value != ""), None)
+
+
+def _job_display_text(value):
+    if isinstance(value, dict):
+        return _clean_job_text(_first_job_value(value.get("display_name"), value.get("name"), value.get("label"), value.get("title")))
+    if isinstance(value, list):
+        return ", ".join(filter(None, (_job_display_text(item) for item in value)))
+    if isinstance(value, (str, int, float)):
+        return _clean_job_text(str(value))
+    return ""
+
+
+def _extract_labeled_job_field(text, *labels):
+    if not isinstance(text, str) or not text or not labels:
+        return None
+    label_pattern = "|".join(re.escape(label).replace(r"\ ", r"\s*") for label in labels)
+    all_labels = r"(?:salary(?:\s+range)?|compensation|experience|exp|location|job\s*type|employment\s*type|eligibility|qualification|education|apply\s*by|application\s*deadline|deadline|last\s*date|duration|work\s*mode)"
+    match = re.search(
+        rf"(?<![\w])(?:{label_pattern})\s*:\s*(.*?)(?=\s+(?:{all_labels})\s*:|$)",
+        text, re.IGNORECASE,
+    )
+    value = _clean_job_text(match.group(1)) if match else ""
+    return value.strip(" .;|\t") or None
+
+
+def _source_posted_at(value):
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+def _job_experience_requirement(text):
+    labeled = _extract_labeled_job_field(text, "experience", "exp")
+    if labeled:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:[-–to]\s*(\d+(?:\.\d+)?))?\s*(\+)?\s*(?:years?|yrs?)\b", labeled, re.IGNORECASE)
+        if match:
+            if match.group(2):
+                return f"{match.group(1)}–{match.group(2)} years"
+            return f"{match.group(1)}{'+' if match.group(3) else ''} years"
+    match = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", text, re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}–{match.group(2)} years"
+    match = re.search(r"\b(\d+(?:\.\d+)?)\+?\s*(?:years?|yrs?)\s+(?:of\s+)?experience\b", text, re.IGNORECASE)
+    return f"{match.group(1)}+ years" if match else None
+
+
+def _estimated_package_for_role(title, description=""):
+    """Return a clearly marked sample-market range for a recognized role family."""
+    role_patterns = [
+        ("Agentic AI Engineer", r"\bagentic\b"),
+        ("MLOps Engineer", r"\bmlops\b"),
+        ("NLP Engineer", r"\bnlp\b|natural language processing"),
+        ("AI/ML Engineer", r"\bai\s*/?\s*ml\b|machine learning|artificial intelligence|\bai engineer\b|copilot|generative ai|\bllm\b"),
+        ("Data Scientist", r"\bdata scientist\b"),
+        ("Data Analyst", r"\bdata analyst\b"),
+        ("Business Intelligence Analyst", r"\b(business intelligence|bi analyst)\b"),
+        ("Data Engineer", r"\bdata engineer\b"),
+        ("Cybersecurity Analyst", r"\b(cyber ?security|security analyst|information security)\b"),
+        ("Database Administrator", r"\b(database administrator|\bdba\b)"),
+        ("Product Manager", r"\bproduct manager\b"),
+        ("UX Designer", r"\b(ux|user experience)\b"),
+        ("Mobile Application Developer", r"\b(mobile|android|ios)\b"),
+        ("QA Engineer", r"\b(qa|quality assurance|test engineer)\b"),
+        ("DevOps Engineer", r"\b(devops|site reliability|sre|reliability engineer)\b"),
+        ("Cloud Engineer", r"\bcloud engineer\b"),
+        ("Automation Engineer", r"\bautomation engineer\b"),
+        ("Backend Developer", r"\b(back[ -]?end|server[ -]?side)\b"),
+        ("Frontend Developer", r"\b(front[ -]?end|ui developer)\b"),
+        ("Full-Stack Developer", r"\b(full[ -]?stack|software engineer|software developer|application developer)\b"),
+    ]
+    if not isinstance(title, str) or not title.strip():
+        return None
+    match_text = f"{title} {description if isinstance(description, str) else ''}"
+    role_title = next((role for role, pattern in role_patterns if re.search(pattern, match_text, re.I)), None)
+    if not role_title:
+        return None
+    try:
+        market = json.loads(MARKET_DATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    salary = next((item.get("salary_lpa") for item in market.get("roles", []) if isinstance(item, dict) and item.get("title") == role_title), None)
+    if not isinstance(salary, str) or not salary.strip():
+        return None
+    salary = re.sub(r"\s*\(sample\)\s*$", "", salary, flags=re.I).strip()
+    return f"{salary} (project estimate)"
+
+
+def _job_qualification(text):
+    for sentence in re.split(r"(?<=[.!?])\s+|\n", text):
+        if re.search(r"\b(qualification|degree|bachelor|master|b\.tech|btech|b\.e\.?|m\.tech|diploma|graduate)\b", sentence, re.IGNORECASE):
+            return sentence.strip()[:260]
+    return None
+
+
+def _job_work_mode(text):
+    if re.search(r"\b(remote|work from home|work remotely|fully remote)\b", text, re.IGNORECASE):
+        return "Remote"
+    if re.search(r"\b(hybrid|office and remote)\b", text, re.IGNORECASE):
+        return "Hybrid"
+    if re.search(r"\b(on.site|in.office|work from office)\b", text, re.IGNORECASE):
+        return "On-site"
+    return None
+
+
+def _job_employment_type(title, ad):
+    if re.search(r"\bintern(ship)?\b", title, re.IGNORECASE):
+        return "Internship"
+    contract = str(ad.get("contract_type") or "").casefold()
+    hours = str(ad.get("contract_time") or "").casefold()
+    if contract == "contract":
+        return "Contract"
+    if hours == "part_time":
+        return "Part-time"
+    if contract in {"permanent", "full_time"} or hours == "full_time":
+        return "Full-time"
+    return None
+
+
+def _profile_job_match(title, description, location, work_mode, experience, qualification, resume_text, profile, preferences):
+    if not resume_text.strip():
+        return None, [], [], "Upload and analyse a resume to calculate a profile match."
+    job_skills = set(detect_skill_counts(f"{title} {description}", SKILL_ALIASES))
+    resume_skills = set(detect_skill_counts(resume_text, SKILL_ALIASES))
+    matched = sorted(job_skills & resume_skills, key=str.casefold)
+    missing = sorted(job_skills - resume_skills, key=str.casefold)
+    if len(job_skills) < 2:
+        return None, matched, missing, "The published job text does not name enough catalog skills for a reliable match estimate."
+
+    signals = [(len(matched) / len(job_skills) * 100, 0.70, "skills")]
+    details = []
+    if matched:
+        details.append(f"matching skills: {', '.join(matched[:6])}")
+    if missing:
+        details.append(f"skills to strengthen: {', '.join(missing[:5])}")
+
+    years = profile.get("years_of_experience")
+    if not isinstance(years, (int, float)):
+        years_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+(?:of\s+)?experience\b", resume_text, re.IGNORECASE)
+        years = float(years_match.group(1)) if years_match else None
+    requirement = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)", experience or "", re.IGNORECASE)
+    if years is not None and requirement:
+        minimum, maximum = float(requirement.group(1)), float(requirement.group(2))
+        distance = max(minimum - years, years - maximum, 0)
+        signals.append((max(0, 100 - distance * 35), 0.10, "experience"))
+        details.append("experience range considered")
+
+    education = " ".join([profile.get("education", ""), resume_text]).casefold()
+    if qualification and re.search(r"\b(qualification|degree|bachelor|master|b\.tech|btech|b\.e\.?|m\.tech|diploma|graduate)\b", qualification, re.IGNORECASE):
+        education_terms = ["b.tech", "btech", "b.e", "be ", "bachelor", "master", "m.tech", "diploma", "degree", "graduate"]
+        job_terms = [term for term in education_terms if term in qualification.casefold()]
+        if job_terms and education.strip():
+            signals.append((100 if any(term in education for term in job_terms) else 0, 0.06, "education"))
+            details.append("education requirement considered")
+
+    preferred_roles = [value.casefold().strip() for value in preferences.get("preferred_roles", []) if isinstance(value, str) and value.strip()]
+    if preferred_roles:
+        title_norm = title.casefold()
+        role_fit = 100 if any(role in title_norm or title_norm in role for role in preferred_roles) else 0
+        signals.append((role_fit, 0.07, "role preference"))
+        if role_fit:
+            details.append("matches a preferred role")
+
+    preferred_locations = [value.casefold().strip() for value in preferences.get("preferred_locations", []) if isinstance(value, str) and value.strip()]
+    if preferred_locations:
+        location_norm = (location or "").casefold()
+        location_fit = 100 if any(value in location_norm or (value == "remote" and work_mode == "Remote") for value in preferred_locations) else 0
+        signals.append((location_fit, 0.07, "location preference"))
+        if location_fit:
+            details.append("matches a preferred location")
+
+    total_weight = sum(weight for _, weight, _ in signals)
+    score = round(sum(value * weight for value, weight, _ in signals) / total_weight)
+    explanation = "Based on detected skills in the published listing text and your saved resume" + (f"; {', '.join(details)}." if details else ".")
+    return score, matched, missing, explanation
+
+
+def _normalise_egig_job(ad, resume_text, profile, preferences, *, source="eGig", url_validator=_safe_egig_url):
+    if not isinstance(ad, dict):
+        return None
+    title = _job_display_text(_first_job_value(ad.get("title"), ad.get("job_title"), ad.get("role"), ad.get("position")))
+    url = url_validator(_first_job_value(ad.get("url"), ad.get("job_url"), ad.get("link"), ad.get("apply_url"), ad.get("href")))
+    raw_id = _first_job_value(ad.get("id"), ad.get("job_id"), ad.get("jobId"), ad.get("slug"))
+    if not raw_id and url:
+        raw_id = uuid.uuid5(uuid.NAMESPACE_URL, url).hex
+    if not title or not raw_id:
+        return None
+    company_data = _first_job_value(ad.get("company"), ad.get("employer"), ad.get("organization"))
+    company_name = _job_display_text(_first_job_value(ad.get("company_name"), ad.get("employer_name"), company_data)) or None
+    company_logo = _first_job_value(ad.get("company_logo"), ad.get("logo"), company_data.get("logo") if isinstance(company_data, dict) else None)
+    if not isinstance(company_logo, str) or not company_logo.startswith("https://"):
+        company_logo = None
+    raw_location = _first_job_value(ad.get("location"), ad.get("place"), ad.get("city"))
+    location = _job_display_text(raw_location) or None
+    if isinstance(raw_location, dict):
+        location = ", ".join(filter(None, [_job_display_text(raw_location.get("city")), _job_display_text(raw_location.get("state")), _job_display_text(raw_location.get("country"))])) or location
+    description = _job_display_text(_first_job_value(ad.get("description"), ad.get("summary"), ad.get("details")))[:6000]
+    salary_data = ad.get("salary") if isinstance(ad.get("salary"), dict) else {}
+    salary_label = _job_display_text(_first_job_value(ad.get("salary_text"), ad.get("pay"), ad.get("salary_display"), salary_data.get("display"), salary_data.get("text")))[:200] or None
+    salary_min = _first_job_value(ad.get("salary_min"), ad.get("min_salary"), salary_data.get("min"), salary_data.get("minimum"))
+    salary_max = _first_job_value(ad.get("salary_max"), ad.get("max_salary"), salary_data.get("max"), salary_data.get("maximum"))
+    try:
+        salary_min = float(salary_min) if salary_min is not None else None
+    except (TypeError, ValueError):
+        salary_min = None
+    try:
+        salary_max = float(salary_max) if salary_max is not None else None
+    except (TypeError, ValueError):
+        salary_max = None
+    employment_value = _job_display_text(_first_job_value(ad.get("employment_type"), ad.get("job_type"), ad.get("type")))
+    employment_type = _job_employment_type(title, {"contract_type": employment_value, "contract_time": employment_value})
+    if not employment_type and employment_value:
+        employment_type = next((label for label, pattern in [("Part-time", r"part[\s_-]*time"), ("Full-time", r"full[\s_-]*time|permanent"), ("Contract", r"contract"), ("Internship", r"intern") ] if re.search(pattern, employment_value, re.I)), None)
+    remote_value = ad.get("remote")
+    if isinstance(remote_value, bool) and remote_value:
+        work_mode = "Remote"
+    else:
+        work_mode = _job_display_text(_first_job_value(ad.get("work_mode"), ad.get("workplace_type"), ad.get("remote_type"))) or _job_work_mode(f"{title} {description}")
+    if work_mode:
+        work_mode = next((label for label, pattern in [("Remote", "remote"), ("Hybrid", "hybrid"), ("On-site", r"on[\s_-]*site|office") ] if re.search(pattern, work_mode, re.I)), None)
+    experience = _job_display_text(_first_job_value(ad.get("experience"), ad.get("experience_required"), ad.get("experience_level"))) or _job_experience_requirement(description)
+    qualification = _job_display_text(_first_job_value(ad.get("qualification"), ad.get("eligibility"), ad.get("requirements"), ad.get("education"))) or _job_qualification(description)
+    salary_period = _job_display_text(_first_job_value(ad.get("salary_period"), ad.get("pay_period"), salary_data.get("period"))) or None
+    salary_currency = _job_display_text(_first_job_value(ad.get("salary_currency"), ad.get("currency"), salary_data.get("currency"))) or ("INR" if salary_label or salary_min is not None or salary_max is not None else None)
+    posted_at = _source_posted_at(_first_job_value(ad.get("posted_at"), ad.get("posted"), ad.get("created_at"), ad.get("date")))
+    application_deadline = _source_posted_at(_first_job_value(ad.get("application_deadline"), ad.get("deadline"), ad.get("last_date")))
+    if not application_deadline:
+        application_deadline = _job_display_text(_first_job_value(ad.get("application_deadline"), ad.get("deadline"), ad.get("last_date"))) or None
+    duration = _job_display_text(_first_job_value(ad.get("duration"), ad.get("internship_duration"))) or None
+    listing_source = _job_display_text(_first_job_value(ad.get("listed_by"), ad.get("listing_source"), ad.get("source_name"))) or None
+    score, matched, missing, explanation = _profile_job_match(
+        title, description, location, work_mode, experience, qualification,
+        resume_text, profile, preferences,
+    )
+    raw_skills = _first_job_value(ad.get("required_skills"), ad.get("skills"), ad.get("tags"))
+    required_skills = [_job_display_text(value) for value in raw_skills] if isinstance(raw_skills, list) else []
+    if not required_skills:
+        required_skills = sorted(set(detect_skill_counts(f"{title} {description}", SKILL_ALIASES)), key=str.casefold)
+    return {
+        "job_id": f"{source.casefold()}:{str(raw_id)[:120]}", "external_job_id": str(raw_id)[:120], "source": source, "title": title[:200],
+        "company_name": company_name[:160] if company_name else None,
+        "company_logo": company_logo[:2000] if company_logo else None, "location": location,
+        "salary_label": salary_label,
+        "salary_min": salary_min, "salary_max": salary_max,
+        "salary_currency": salary_currency, "salary_period": salary_period,
+        "employment_type": employment_type, "work_mode": work_mode,
+        "experience": experience, "qualification": qualification,
+        "job_url": url, "posted_at": posted_at,
+        "application_deadline": application_deadline, "duration": duration, "description": description,
+        "listing_source": listing_source or (source if source != "eGig" else None),
+        "required_skills": required_skills,
+        "matching_skills": matched, "missing_skills": missing,
+        "match_percentage": score, "match_explanation": explanation,
+    }
+
+
+def _normalise_arbeitnow_job(ad, resume_text, profile, preferences):
+    if not isinstance(ad, dict):
+        return None
+    job_types = ad.get("job_types")
+    if isinstance(job_types, list):
+        job_types = job_types[0] if job_types else None
+    remote_value = ad.get("remote")
+    remote = remote_value is True or str(remote_value).casefold() in {"true", "yes", "1", "remote"}
+    adapted = {
+        "id": _first_job_value(ad.get("slug"), ad.get("id")), "title": ad.get("title"),
+        "url": ad.get("url"), "company_name": ad.get("company_name"), "company_logo": ad.get("company_logo"),
+        "location": ad.get("location") or ("Remote" if remote else None), "remote": remote,
+        "job_type": job_types, "created_at": ad.get("created_at"), "description": ad.get("description"),
+        "tags": ad.get("tags"), "listed_by": "Arbeitnow",
+    }
+    return _normalise_egig_job(adapted, resume_text, profile, preferences, source="Arbeitnow", url_validator=_safe_arbeitnow_url)
+
+
+def _normalise_remotive_job(ad, resume_text, profile, preferences):
+    if not isinstance(ad, dict):
+        return None
+    salary = _job_display_text(ad.get("salary")) or None
+    adapted = {
+        "id": ad.get("id"), "title": ad.get("title"), "url": ad.get("url"),
+        "company_name": ad.get("company_name"), "company_logo": ad.get("company_logo"),
+        "location": ad.get("candidate_required_location") or "Remote", "remote": True,
+        "job_type": ad.get("job_type"), "posted_at": ad.get("publication_date"),
+        "salary_text": salary, "salary_currency": "USD" if salary and "$" in salary else None,
+        "description": ad.get("description"), "tags": [ad.get("category")] if ad.get("category") else [],
+        "listed_by": "Remotive",
+    }
+    return _normalise_egig_job(adapted, resume_text, profile, preferences, source="Remotive", url_validator=_safe_remotive_url)
+
+
+_PUBLIC_JOB_FEED_CACHE = {}
+
+
+async def _cached_public_job_feed(client, cache_key, url, *, ttl_seconds, params=None):
+    now = time.monotonic()
+    cached = _PUBLIC_JOB_FEED_CACHE.get(cache_key)
+    if cached and now - cached["cached_at"] < ttl_seconds:
+        return cached["data"]
+    try:
+        response = await client.get(url, params=params, headers={"Accept": "application/json"})
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}")
+        data = response.json()
+        if not isinstance(data, (dict, list)):
+            raise ValueError("Provider response was not JSON job data")
+        _PUBLIC_JOB_FEED_CACHE[cache_key] = {"cached_at": now, "data": data}
+        return data
+    except Exception:
+        if cached:
+            return cached["data"]
+        raise
+
+
+def _normalise_adzuna_job(ad, resume_text, profile, preferences, country="in"):
+    if not isinstance(ad, dict):
+        return None
+    title = _job_display_text(ad.get("title"))
+    raw_id = str(ad.get("id", "")).strip()
+    if not title or not raw_id:
+        return None
+    company = ad.get("company") if isinstance(ad.get("company"), dict) else {}
+    location_data = ad.get("location") if isinstance(ad.get("location"), dict) else {}
+    description = _job_display_text(ad.get("description"))[:6000]
+    location = _extract_labeled_job_field(description, "location", "job location") or _job_display_text(location_data.get("display_name")) or None
+    source_salary_label = _extract_labeled_job_field(description, "salary", "salary range", "compensation")
+    salary_predicted = str(ad.get("salary_is_predicted", "0")).casefold() in {"1", "true"}
+    salary_min = ad.get("salary_min")
+    salary_max = ad.get("salary_max")
+    salary_min = float(salary_min) if isinstance(salary_min, (int, float)) else None
+    salary_max = float(salary_max) if isinstance(salary_max, (int, float)) else None
+    currency = "INR" if country == "in" and (salary_min is not None or salary_max is not None) else None
+    symbol = "₹" if currency == "INR" else ""
+    def amount(value):
+        return f"{symbol}{value:,.0f}"
+    salary_label = source_salary_label[:200] if source_salary_label else None
+    if not salary_label and (salary_min is not None or salary_max is not None):
+        range_text = f"{amount(salary_min)}–{amount(salary_max)}" if salary_min is not None and salary_max is not None else amount(salary_min if salary_min is not None else salary_max)
+        salary_label = f"{range_text} ({'estimated by Adzuna' if salary_predicted else 'period not specified by source'})"
+    if not salary_label:
+        salary_label = _estimated_package_for_role(title, description)
+    employment_type = _job_employment_type(title, ad)
+    if not employment_type:
+        job_type = _extract_labeled_job_field(description, "job type", "jobtype", "employment type")
+        if job_type:
+            employment_type = _job_employment_type(title, {"contract_type": job_type, "contract_time": job_type})
+            if not employment_type:
+                employment_type = next((label for label, pattern in [("Full-time", r"full[\s_-]*time|permanent"), ("Part-time", r"part[\s_-]*time"), ("Contract", r"contract"), ("Internship", r"intern") ] if re.search(pattern, job_type, re.I)), None)
+    source_work_mode = _extract_labeled_job_field(description, "work mode")
+    work_mode = None
+    if source_work_mode:
+        work_mode = next((label for label, pattern in [
+            ("Remote", r"remote|work\s+from\s+home|wfh"),
+            ("Hybrid", r"hybrid"),
+            ("On-site", r"on[\s-]*site|onsite|office[\s-]*based"),
+        ] if re.search(pattern, source_work_mode, re.I)), None)
+    work_mode = work_mode or _job_work_mode(f"{title} {description}")
+    experience = _job_experience_requirement(description)
+    qualification = _extract_labeled_job_field(description, "eligibility", "qualification", "education") or _job_qualification(description)
+    job_url = _safe_adzuna_url(ad.get("redirect_url"))
+    posted_at = _source_posted_at(ad.get("created"))
+    deadline_text = _extract_labeled_job_field(description, "apply by", "application deadline", "deadline", "last date")
+    application_deadline = _source_posted_at(deadline_text) if deadline_text else None
+    if deadline_text and not application_deadline:
+        application_deadline = deadline_text
+    duration_label = _extract_labeled_job_field(description, "duration")
+    duration_match = re.search(r"\b(?:duration|for)\s+(\d+\s*(?:weeks?|months?))\b", description, re.I)
+    score, matched, missing, explanation = _profile_job_match(
+        title, description, location, work_mode, experience, qualification,
+        resume_text, profile, preferences,
+    )
+    logo = company.get("logo") if isinstance(company.get("logo"), str) else None
+    if logo and not logo.startswith("https://"):
+        logo = None
+    return {
+        "job_id": f"adzuna:{raw_id[:120]}", "external_job_id": raw_id[:120], "source": "Adzuna",
+        "title": title[:200], "company_name": _job_display_text(company.get("display_name"))[:160] or None,
+        "company_logo": logo[:2000] if logo else None, "location": location,
+        "salary_label": salary_label, "salary_min": salary_min, "salary_max": salary_max,
+        "salary_currency": currency, "salary_period": None,
+        "employment_type": employment_type, "work_mode": work_mode,
+        "experience": experience, "qualification": qualification, "duration": duration_label or (duration_match.group(1) if duration_match else None),
+        "job_url": job_url, "posted_at": posted_at, "application_deadline": application_deadline,
+        "description": description, "listing_source": None,
+        "required_skills": sorted(set(detect_skill_counts(f"{title} {description}", SKILL_ALIASES)), key=str.casefold),
+        "matching_skills": matched, "missing_skills": missing,
+        "match_percentage": score, "match_explanation": explanation,
+    }
+
+
+@app.post("/notifications/sample-jobs/seed")
+def seed_sample_job_notifications(authorization: str | None = Header(default=None)):
+    """Create 100 clearly marked, non-live role/package examples for the dashboard."""
+    uid = authenticated_uid(authorization)
+    roles = json.loads((APP_DIR / "roles.json").read_text(encoding="utf-8"))
+    market = json.loads(MARKET_DATA_PATH.read_text(encoding="utf-8"))
+    packages = {item["title"]: item.get("salary_lpa") for item in market.get("roles", []) if isinstance(item, dict)}
+    levels = ["Fresher", "Junior", "Associate", "Mid-level", "Senior"]
+    examples = []
+    for role_index, role in enumerate(roles):
+        role_title = str(role.get("title", "")).strip()
+        package = packages.get(role_title)
+        if not role_title or not package:
+            continue
+        for level_index, level in enumerate(levels):
+            examples.append({
+                "key": f"sample-job:v1:{role_index}:{level_index}",
+                "title": f"{level} {role_title}",
+                "role": role_title,
+                "salary": str(package),
+                "level": level,
+                "description": str(role.get("description", ""))[:2000],
+                "skills": list(role.get("required_skills", {}).keys())[:20],
+            })
+    if len(examples) < 100:
+        raise HTTPException(status_code=500, detail="The sample role and salary catalog does not contain 100 entries.")
+    examples = examples[:100]
+    now = datetime.now(timezone.utc)
+    connection = get_database()
+    try:
+        ensure_user(uid, connection)
+        created = 0
+        with connection:
+            existing = {row[0] for row in connection.execute(
+                "SELECT dedupe_key FROM notifications WHERE uid = ? AND dedupe_key LIKE 'sample-job:v1:%'", (uid,)
+            ).fetchall()}
+            for sequence, item in enumerate(examples):
+                if item["key"] in existing:
+                    continue
+                notice_id = str(uuid.uuid4())
+                created_at = (now - timedelta(seconds=sequence)).isoformat()
+                message = f"Illustrative {item['level'].lower()} career-path example for {item['role']}. Salary range comes from CareerInfinity's sample market dataset; this is not an employer job offer."
+                connection.execute(
+                    """INSERT INTO notifications
+                    (id, uid, title, message, category, notification_type, job_id, company_name,
+                     match_percentage, is_read, action_url, created_at, is_demo, dedupe_key)
+                    VALUES (?, ?, ?, ?, 'job_match', 'sample_job', ?, NULL, NULL, 0, NULL, ?, 1, ?)""",
+                    (notice_id, uid, item["title"], message, f"sample:{item['key']}", created_at, item["key"]),
+                )
+                connection.execute(
+                    """INSERT INTO notification_job_details
+                    (notification_id, source, external_job_id, location, salary_currency,
+                     salary_period, salary_label, employment_type, experience, qualification,
+                     description, required_skills_json, matching_skills_json, missing_skills_json,
+                     match_explanation, last_seen_at)
+                    VALUES (?, 'Sample data', ?, NULL, 'INR', 'annual estimate', ?, 'Full-time',
+                     'Not disclosed in sample data', 'Not disclosed in sample data', ?, ?, '[]', '[]', ?, ?)""",
+                    (notice_id, item["key"], item["salary"], item["description"], json.dumps(item["skills"]), message, created_at),
+                )
+                created += 1
+        total = connection.execute(
+            "SELECT COUNT(*) FROM notifications WHERE uid = ? AND dedupe_key LIKE 'sample-job:v1:%'", (uid,)
+        ).fetchone()[0]
+        return {"source": "CareerInfinity sample data", "created": created, "total": total, "already_seeded": created == 0}
+    finally:
+        connection.close()
+
+
+@app.get("/notifications/jobs/provider-status")
+def notification_job_provider_status(authorization: str | None = Header(default=None)):
+    authenticated_uid(authorization)
+    app_id = bool(os.environ.get("ADZUNA_APP_ID", "").strip())
+    app_key = bool(os.environ.get("ADZUNA_APP_KEY", "").strip())
+    providers = ["eGig", "Arbeitnow", "Remotive"]
+    if app_id and app_key:
+        providers.insert(0, "Adzuna")
+    return {"provider": " + ".join(providers), "providers": providers, "adzuna_configured": app_id and app_key, "app_id_present": app_id, "app_key_present": app_key}
+
+
+@app.post("/notifications/jobs/refresh")
+async def refresh_live_jobs(authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    adzuna_app_id = os.environ.get("ADZUNA_APP_ID", "").strip()
+    adzuna_app_key = os.environ.get("ADZUNA_APP_KEY", "").strip()
+    use_adzuna = bool(adzuna_app_id and adzuna_app_key)
+    providers = (["Adzuna"] if use_adzuna else []) + ["eGig", "Arbeitnow", "Remotive"]
+    provider = " + ".join(providers)
+    country = os.environ.get("ADZUNA_COUNTRY", "in").strip().casefold()
+    if use_adzuna and not re.fullmatch(r"[a-z]{2}", country):
+        raise HTTPException(status_code=503, detail="ADZUNA_COUNTRY must be a two-letter country code such as in.")
+    connection = get_database()
+    try:
+        profile, _ = ensure_user(uid, connection)
+        resume = latest_resume(uid, connection)
+        resume_text = resume["extracted_text"] if resume else ""
+        match_data = json.loads(resume["role_matches_json"] or "{}") if resume else {}
+        pref_row = connection.execute("SELECT preferences_json FROM notification_preferences WHERE uid = ?", (uid,)).fetchone()
+        preferences = {**NOTIFICATION_DEFAULT_PREFERENCES, **(json.loads(pref_row["preferences_json"]) if pref_row else {})}
+        if not preferences.get("job_matches", True) or not preferences.get("in_app_notifications", True):
+            return {"source": provider, "refreshed": False, "created": 0, "updated": 0, "skipped": "Job notifications are disabled in preferences."}
+
+        preferred_roles = [value.strip() for value in preferences.get("preferred_roles", []) if isinstance(value, str) and value.strip()]
+        if not preferred_roles:
+            preferred_roles = [item.get("role", "") for item in match_data.get("roles", [])[:3] if isinstance(item, dict) and item.get("role")]
+        if not preferred_roles and profile.get("target_role"):
+            preferred_roles = [str(profile["target_role"]).strip()]
+        if not preferred_roles:
+            preferred_roles = ["Python Developer", "Data Analyst", "Software Developer"]
+        roles = list(dict.fromkeys(preferred_roles))[:3]
+        preferred_locations = [value.strip() for value in preferences.get("preferred_locations", []) if isinstance(value, str) and value.strip()]
+        location = next((value for value in preferred_locations if value.casefold() != "remote"), None)
+        source_requests = []
+        if use_adzuna:
+            adzuna_url = f"https://api.adzuna.com/v1/api/jobs/{country}/search/1"
+            for role in roles:
+                params = {"app_id": adzuna_app_id, "app_key": adzuna_app_key, "results_per_page": 20, "what": role, "sort_by": "date", "content-type": "application/json"}
+                if location:
+                    params["where"] = location
+                source_requests.append(("Adzuna", (adzuna_url, params)))
+
+        egig_url = "https://egig.in/api/open/jobs"
+        for role in roles:
+            params = {"q": role, "limit": 20}
+            if location:
+                params["location"] = location
+            elif preferences.get("work_modes") == ["Remote"]:
+                params["remote"] = True
+            source_requests.append(("eGig", (egig_url, params)))
+
+        ads_by_source = {name: [] for name in providers}
+        failures_by_source = {name: 0 for name in providers}
+        try:
+            async with httpx.AsyncClient(timeout=18.0, follow_redirects=False) as client:
+                tasks = [client.get(url, params=params, headers={"Accept": "application/json"}) for _, (url, params) in source_requests]
+                source_requests.extend([
+                    ("Arbeitnow", ("cached", _cached_public_job_feed(client, "arbeitnow:jobs", "https://www.arbeitnow.com/api/job-board-api", ttl_seconds=3600))),
+                    ("Remotive", ("cached", _cached_public_job_feed(client, "remotive:jobs", "https://remotive.com/api/remote-jobs", ttl_seconds=21600, params={"limit": 500}))),
+                ])
+                tasks.extend(task for _, (kind, task) in source_requests[len(tasks):] if kind == "cached")
+                responses = await asyncio.gather(*tasks, return_exceptions=True)
+        except httpx.HTTPError as error:
+            logger.warning("Combined job search unavailable (%s).", type(error).__name__)
+            raise HTTPException(status_code=502, detail="Job providers are temporarily unavailable. Try again later.") from error
+
+        def extract_jobs(source, result):
+            if source == "Adzuna":
+                return result.get("results", []) if isinstance(result, dict) else []
+            if source == "Arbeitnow":
+                return result.get("data", []) if isinstance(result, dict) else []
+            if source == "Remotive":
+                return result.get("jobs", []) if isinstance(result, dict) else []
+            if isinstance(result, list):
+                return result
+            if isinstance(result, dict):
+                for key in ("jobs", "results", "items", "listings", "data"):
+                    values = result.get(key)
+                    if isinstance(values, list):
+                        return values
+                    if isinstance(values, dict):
+                        nested = next((values.get(name) for name in ("jobs", "results", "items", "listings") if isinstance(values.get(name), list)), None)
+                        if nested is not None:
+                            return nested
+            return []
+
+        source_ads = []
+        for (source, (kind, _)), result in zip(source_requests, responses):
+            if isinstance(result, Exception):
+                failures_by_source[source] = failures_by_source.get(source, 0) + 1
+                logger.info("%s job feed unavailable (%s).", source, type(result).__name__)
+                continue
+            if kind != "cached" and getattr(result, "status_code", 0) != 200:
+                failures_by_source[source] = failures_by_source.get(source, 0) + 1
+                logger.info("%s job feed returned HTTP %s.", source, getattr(result, "status_code", "unknown"))
+                continue
+            try:
+                payload = result if kind == "cached" else result.json()
+            except (ValueError, TypeError):
+                failures_by_source[source] = failures_by_source.get(source, 0) + 1
+                continue
+            source_ads.extend((source, ad) for ad in extract_jobs(source, payload) if isinstance(ad, dict))
+
+        failures = sum(failures_by_source.values())
+        if not source_ads and failures >= len(source_requests):
+            raise HTTPException(status_code=502, detail="All job providers are unavailable. Check Adzuna credentials, then retry.")
+
+        seen_ids, seen_fingerprints = set(), set()
+        normalized = []
+        stopwords = {"and", "the", "for", "with", "senior", "junior", "lead", "engineer", "developer", "software", "full", "stack", "role", "jobs", "job"}
+        role_terms = {token.casefold() for role in roles for token in re.findall(r"[a-z0-9+#.]+", role, re.I) if len(token) >= 3 and token.casefold() not in stopwords}
+        for source, ad in source_ads:
+            item = _normalise_adzuna_job(ad, resume_text, profile, preferences, country) if source == "Adzuna" else _normalise_arbeitnow_job(ad, resume_text, profile, preferences) if source == "Arbeitnow" else _normalise_remotive_job(ad, resume_text, profile, preferences) if source == "Remotive" else _normalise_egig_job(ad, resume_text, profile, preferences)
+            if not item or item["job_id"] in seen_ids:
+                continue
+            searchable = f"{item['title']} {item['description']}".casefold()
+            if source in {"Arbeitnow", "Remotive"} and role_terms and not any(term in searchable for term in role_terms):
+                continue
+            if preferred_locations:
+                location_value = (item["location"] or "").casefold()
+                location_match = any((value.casefold() == "remote" and item["work_mode"] == "Remote") or value.casefold() in location_value for value in preferred_locations)
+                if not location_match:
+                    continue
+            if item["work_mode"] and preferences.get("work_modes") and item["work_mode"] not in preferences["work_modes"]:
+                continue
+            if item["employment_type"] and preferences.get("job_types") and item["employment_type"] not in preferences["job_types"]:
+                continue
+            fingerprint = "|".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip() for value in (item["title"], item["company_name"], item["location"]))
+            if item["company_name"] and fingerprint in seen_fingerprints:
+                continue
+            seen_ids.add(item["job_id"])
+            if item["company_name"]:
+                seen_fingerprints.add(fingerprint)
+            normalized.append(item)
+        normalized.sort(key=lambda item: (
+            -(item["match_percentage"] if item["match_percentage"] is not None else -1),
+            0 if item["experience"] and re.search(r"\b0(?:\.0)?\s*(?:-|–|to)", item["experience"]) else 1,
+            -(datetime.fromisoformat(item["posted_at"].replace("Z", "+00:00")).timestamp() if item["posted_at"] else 0),
+        ))
+        now = datetime.now(timezone.utc).isoformat()
+        created = updated = 0
+        connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            if normalized:
+                connection.execute("DELETE FROM notifications WHERE uid = ? AND dedupe_key LIKE 'sample-job:v1:%'", (uid,))
+            for item in normalized:
+                existing = connection.execute("SELECT id, is_read FROM notifications WHERE uid = ? AND job_id = ?", (uid, item["job_id"])).fetchone()
+                minimum = int(preferences.get("minimum_match_percentage", 70))
+                unread = item["match_percentage"] is not None and item["match_percentage"] >= minimum
+                message = item["match_explanation"]
+                posted_at = item["posted_at"] or now
+                if existing:
+                    notice_id = existing["id"]
+                    connection.execute(
+                    """UPDATE notifications SET title=?, message=?, category=?, notification_type=?, company_name=?,
+                        match_percentage=?, action_url=?, created_at=? WHERE id=? AND uid=?""",
+                        (item["title"], message, "internship" if item["employment_type"] == "Internship" else "job_match", f"{item['source'].casefold()}_job", item["company_name"], item["match_percentage"], item["job_url"], posted_at, notice_id, uid),
+                    )
+                    updated += 1
+                else:
+                    notice_id = str(uuid.uuid4())
+                    connection.execute(
+                        """INSERT INTO notifications
+                        (id, uid, title, message, category, notification_type, job_id, company_name,
+                         match_percentage, is_read, action_url, created_at, is_demo, dedupe_key)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                        (notice_id, uid, item["title"], message, "internship" if item["employment_type"] == "Internship" else "job_match", f"{item['source'].casefold()}_job", item["job_id"], item["company_name"], item["match_percentage"], 0 if unread else 1, item["job_url"], posted_at, item["job_id"]),
+                    )
+                    created += 1
+                connection.execute(
+                    """INSERT INTO notification_job_details
+                    (notification_id, source, external_job_id, company_logo, location, salary_min, salary_max,
+                     salary_currency, salary_period, salary_label, duration, listing_source, employment_type, work_mode, experience, qualification,
+                     job_url, posted_at, application_deadline, description, required_skills_json,
+                     matching_skills_json, missing_skills_json, match_explanation, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(notification_id) DO UPDATE SET
+                    source=excluded.source, external_job_id=excluded.external_job_id, company_logo=excluded.company_logo,
+                    location=excluded.location, salary_min=excluded.salary_min, salary_max=excluded.salary_max,
+                    salary_currency=excluded.salary_currency, salary_period=excluded.salary_period, salary_label=excluded.salary_label, duration=excluded.duration, listing_source=excluded.listing_source,
+                    employment_type=excluded.employment_type, work_mode=excluded.work_mode, experience=excluded.experience,
+                    qualification=excluded.qualification, job_url=excluded.job_url, posted_at=excluded.posted_at,
+                    application_deadline=excluded.application_deadline, description=excluded.description,
+                    required_skills_json=excluded.required_skills_json, matching_skills_json=excluded.matching_skills_json,
+                    missing_skills_json=excluded.missing_skills_json, match_explanation=excluded.match_explanation,
+                    last_seen_at=excluded.last_seen_at""",
+                    (notice_id, item["source"], item["external_job_id"], item["company_logo"], item["location"], item["salary_min"], item["salary_max"], item["salary_currency"], item["salary_period"], item["salary_label"], item["duration"], item["listing_source"], item["employment_type"], item["work_mode"], item["experience"], item["qualification"], item["job_url"], item["posted_at"], item["application_deadline"], item["description"], json.dumps(item["required_skills"]), json.dumps(item["matching_skills"]), json.dumps(item["missing_skills"]), item["match_explanation"], now),
+                )
+        return {"source": provider, "providers": providers, "refreshed": True, "created": created, "updated": updated, "jobs": len(normalized), "roles_searched": roles, "provider_failures": failures_by_source, "last_refreshed_at": now}
+    finally:
+        connection.close()
+
+
+@app.get("/notifications")
+def list_notifications(
+    authorization: str | None = Header(default=None),
+    category: str = Query(default="all", max_length=30),
+    status: str = Query(default="all", pattern="^(all|unread|read)$"),
+    search: str = Query(default="", max_length=120),
+    sort: str = Query(default="newest", pattern="^(newest|oldest)$"),
+    offset: int = Query(default=0, ge=0, le=100000),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    uid = authenticated_uid(authorization)
+    allowed_categories = {"all", "job_match", "internship", "application", "interview", "deadline", "ai_insight"}
+    if category not in allowed_categories:
+        raise HTTPException(status_code=400, detail="Choose a valid notification category.")
+    connection = get_database()
+    try:
+        with connection:
+            ensure_user(uid, connection)
+        clauses, params = ["n.uid = ?"], [uid]
+        if category != "all":
+            clauses.append("n.category = ?")
+            params.append(category)
+        if status != "all":
+            clauses.append("n.is_read = ?")
+            params.append(1 if status == "read" else 0)
+        if search.strip():
+            clauses.append("(LOWER(n.title) LIKE ? OR LOWER(n.message) LIKE ? OR LOWER(COALESCE(n.company_name,'')) LIKE ? OR LOWER(n.category) LIKE ? OR LOWER(COALESCE(j.location,'')) LIKE ? OR LOWER(COALESCE(j.description,'')) LIKE ? OR LOWER(COALESCE(j.employment_type,'')) LIKE ?)")
+            term = f"%{search.strip().casefold()}%"
+            params.extend([term, term, term, term, term, term, term])
+        where = " AND ".join(clauses)
+        total = connection.execute(f"SELECT COUNT(*) FROM notifications n LEFT JOIN notification_job_details j ON j.notification_id=n.id WHERE {where}", params).fetchone()[0]
+        unread = connection.execute("SELECT COUNT(*) FROM notifications WHERE uid = ? AND is_read = 0", (uid,)).fetchone()[0]
+        counts = {row["category"]: row["count"] for row in connection.execute(
+            "SELECT category, COUNT(*) AS count FROM notifications WHERE uid = ? GROUP BY category", (uid,)
+        ).fetchall()}
+        direction = "ASC" if sort == "oldest" else "DESC"
+        rows = connection.execute(
+            f"SELECT n.*, j.source, j.external_job_id, j.company_logo, j.location, j.salary_min, j.salary_max, j.salary_currency, j.salary_period, j.salary_label, j.duration, j.listing_source, j.employment_type, j.work_mode, j.experience, j.qualification, j.job_url, j.posted_at, j.application_deadline, j.description, j.required_skills_json, j.matching_skills_json, j.missing_skills_json, j.match_explanation, j.last_seen_at FROM notifications n LEFT JOIN notification_job_details j ON j.notification_id=n.id WHERE {where} ORDER BY n.created_at {direction}, n.id {direction} LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        return {
+            "notifications": [notification_record(row) for row in rows], "total": total,
+            "unread": unread, "displayed": min(offset + len(rows), total), "offset": offset,
+            "limit": limit, "has_more": offset + len(rows) < total,
+            "stats": {"total": sum(counts.values()), "unread": unread,
+                      "job_alerts": counts.get("job_match", 0), "application_updates": counts.get("application", 0)},
+            "category_counts": counts,
+        }
+    finally:
+        connection.close()
+
+
+@app.patch("/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    connection = get_database()
+    try:
+        with connection:
+            cursor = connection.execute("UPDATE notifications SET is_read = 1 WHERE id = ? AND uid = ?", (notification_id, uid))
+        if not cursor.rowcount:
+            raise HTTPException(status_code=404, detail="Notification was not found.")
+        return {"updated": True}
+    finally:
+        connection.close()
+
+
+@app.post("/notifications/read-all")
+def mark_all_notifications_read(authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    connection = get_database()
+    try:
+        with connection:
+            cursor = connection.execute("UPDATE notifications SET is_read = 1 WHERE uid = ? AND is_read = 0", (uid,))
+        return {"updated": cursor.rowcount}
+    finally:
+        connection.close()
+
+
+@app.delete("/notifications/{notification_id}")
+def delete_notification(notification_id: str, authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    connection = get_database()
+    try:
+        with connection:
+            cursor = connection.execute("DELETE FROM notifications WHERE id = ? AND uid = ?", (notification_id, uid))
+        if not cursor.rowcount:
+            raise HTTPException(status_code=404, detail="Notification was not found.")
+        return {"deleted": True}
+    finally:
+        connection.close()
+
+
+@app.get("/notifications/preferences")
+def get_notification_preferences(authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    connection = get_database()
+    try:
+        with connection:
+            ensure_user(uid, connection)
+        row = connection.execute("SELECT preferences_json FROM notification_preferences WHERE uid = ?", (uid,)).fetchone()
+        values = json.loads(row["preferences_json"]) if row else {}
+        return {**NOTIFICATION_DEFAULT_PREFERENCES, **values}
+    finally:
+        connection.close()
+
+
+@app.patch("/notifications/preferences")
+async def update_notification_preferences(request: Request, authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    payload = await request.json()
+    allowed_booleans = set(NOTIFICATION_DEFAULT_PREFERENCES) - {"preferred_roles", "preferred_locations", "work_modes", "job_types", "minimum_match_percentage"}
+    allowed_lists = {"preferred_roles": 20, "preferred_locations": 20, "work_modes": 3, "job_types": 3}
+    if not isinstance(payload, dict) or not payload or set(payload) - (allowed_booleans | set(allowed_lists) | {"minimum_match_percentage"}):
+        raise HTTPException(status_code=400, detail="Send valid notification preference fields.")
+    if any(not isinstance(payload[key], bool) for key in set(payload) & allowed_booleans):
+        raise HTTPException(status_code=400, detail="Notification toggles must be true or false.")
+    for key, maximum in allowed_lists.items():
+        if key in payload and (not isinstance(payload[key], list) or len(payload[key]) > maximum or any(not isinstance(item, str) or len(item) > 80 for item in payload[key])):
+            raise HTTPException(status_code=400, detail=f"{key} must be a short list of text values.")
+    if "minimum_match_percentage" in payload and (not isinstance(payload["minimum_match_percentage"], int) or not 0 <= payload["minimum_match_percentage"] <= 100):
+        raise HTTPException(status_code=400, detail="Minimum match percentage must be between 0 and 100.")
+    connection = get_database()
+    try:
+        with connection:
+            ensure_user(uid, connection)
+            row = connection.execute("SELECT preferences_json FROM notification_preferences WHERE uid = ?", (uid,)).fetchone()
+            current = {**NOTIFICATION_DEFAULT_PREFERENCES, **(json.loads(row["preferences_json"]) if row else {})}
+            current.update(payload)
+            connection.execute(
+                """INSERT INTO notification_preferences (uid, preferences_json, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(uid) DO UPDATE SET preferences_json=excluded.preferences_json, updated_at=excluded.updated_at""",
+                (uid, json.dumps(current), datetime.now(timezone.utc).isoformat()),
+            )
+        return current
+    finally:
+        connection.close()
+
+
 @app.get("/recommendations")
 def recommendations(authorization: str | None = Header(default=None)):
     uid = authenticated_uid(authorization)
@@ -2551,13 +3494,21 @@ def apply_to_drive(
     uid = authenticated_uid(authorization)
     connection = get_database()
     try:
-        if not connection.execute("SELECT 1 FROM placement_drives WHERE id = ?", (drive_id,)).fetchone():
+        drive = connection.execute("SELECT * FROM placement_drives WHERE id = ?", (drive_id,)).fetchone()
+        if not drive:
             raise HTTPException(status_code=404, detail="Placement drive was not found.")
         with connection:
             ensure_user(uid, connection)
             connection.execute(
                 "INSERT OR IGNORE INTO drive_applications (drive_id, uid, created_at) VALUES (?, ?, ?)",
                 (drive_id, uid, datetime.now(timezone.utc).isoformat()),
+            )
+            create_user_notification(
+                connection, uid, f"Interest saved for {drive['role']}",
+                "CareerInfinity saved your interest in this placement drive. This is not confirmation that an employer received an application.",
+                "application", "placement_drive_interest", action_url="/drives",
+                company_name=drive["company"], job_id=drive_id,
+                dedupe_key=f"drive-interest:{drive_id}",
             )
         return {"saved": True}
     finally:

@@ -2,21 +2,23 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
 import {
-  Activity, ArrowDownToLine, ArrowRight, Award, BarChart3, BriefcaseBusiness, Camera, Mic,
+  Activity, ArrowDownToLine, ArrowRight, Award, BarChart3, Bell, BriefcaseBusiness, Camera, Link2, Mic,
   CalendarDays, Check, ChevronLeft, CircleHelp,
   CloudUpload, FileText, GraduationCap, LayoutDashboard, Lightbulb, LoaderCircle,
-  LogOut, Menu, MessageSquareText, Moon, Plus, Settings,
-  Sparkles, Target, Trash2, TrendingUp, Trophy, Upload, Users, X,
+  LogOut, Menu, MessageSquareText, Moon, MoreHorizontal, Plus, Search, Settings,
+  Sparkles, Target, Trash2, TrendingUp, Trophy, Upload, UserRound, Users, X,
 } from "lucide-react";
 import { getApps, initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signOut } from "firebase/auth";
 import {
-  Link, Navigate, Outlet, Route, Routes, useLocation,
+  Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate,
 } from "react-router-dom";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { api, jsonRequest, setTokenProvider } from "./api";
+import NotificationsPage from "./NotificationsPage";
+import { Button, Card, EmptyState, Loading, SelectInput, TextArea, TextInput } from "./components/UI";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyBtPNgsU-UNxrTsYRODcmIF8FhEgGjRIKc",
@@ -36,8 +38,11 @@ const navigationSections = [
     items: [
       { path: "/home", label: "Dashboard", icon: LayoutDashboard },
       { path: "/career", label: "Career intelligence", icon: TrendingUp },
+      { path: "/applications", label: "Applications", icon: BriefcaseBusiness },
+      { path: "/profile", label: "Profile", icon: UserRound },
       { path: "/help", label: "Help & support", icon: CircleHelp },
       { path: "/settings", label: "Settings", icon: Settings },
+      { path: "/notifications", label: "Notifications", icon: Bell },
     ],
   },
   {
@@ -98,14 +103,15 @@ function App() {
   const [summaryError, setSummaryError] = useState("");
   const [theme, setTheme] = useState(() => {
     try {
-      return localStorage.getItem("careerInfinity:theme")
-        || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      return localStorage.getItem("careerInfinity:theme") || "system";
     } catch (error) {
       console.error("Unable to load theme preference.", error);
       return "light";
     }
   });
   const [toast, setToast] = useState("");
+  const [notificationCount, setNotificationCount] = useState(0);
+  const notify = useCallback(message => setToast(message), []);
 
   const refreshSummary = useCallback(async () => {
     try {
@@ -130,6 +136,10 @@ function App() {
     else setSummary(null);
   }, [user, refreshSummary]);
   useEffect(() => {
+    if (!user) { setNotificationCount(0); return; }
+    api("/notifications?limit=1").then(data => setNotificationCount(data.unread || 0)).catch(() => {});
+  }, [user]);
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("careerInfinity:theme", theme);
   }, [theme]);
@@ -145,13 +155,16 @@ function App() {
   return (
     <AppContext.Provider value={{
       user, summary, summaryError, refreshSummary,
-      notify: message => setToast(message),
+      notify,
+      notificationCount, setNotificationCount,
       theme, setTheme,
     }}>
       <Routes>
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/resume" replace />} />
           <Route path="home" element={<DashboardPage />} />
+          <Route path="applications" element={<ApplicationsPage />} />
+          <Route path="profile" element={<ProfilePage />} />
           <Route path="career" element={<CareerIntelligencePage />} />
           <Route path="roadmap" element={<RoadmapPage />} />
           <Route path="skills" element={<Navigate to="/roadmap" replace />} />
@@ -163,6 +176,7 @@ function App() {
           <Route path="documents" element={<DocumentsPage />} />
           <Route path="certificates" element={<CertificatesPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="notifications" element={<NotificationsPage notify={notify} setNotificationCount={setNotificationCount}/>} />
           <Route path="help" element={<HelpPage />} />
           <Route path="*" element={<Navigate to="/resume" replace />} />
         </Route>
@@ -173,22 +187,31 @@ function App() {
 }
 
 function CenteredState({ label, action }) {
-  return <div className="grid min-h-screen place-items-center bg-slate-50 p-6"><div className="text-center"><LoaderCircle className="mx-auto mb-4 animate-spin text-violet" size={28}/><p className="text-sm text-slate-600">{label}</p>{action && <div className="mt-4">{action}</div>}</div></div>;
+  return <div className="auth-state"><div className="auth-state-card"><span className="brand-mark" aria-hidden="true">CI</span><h1>CareerInfinity</h1><p>{label}</p>{action && <div className="mt-4">{action}</div>}</div></div>;
 }
 
 function AppLayout() {
-  const { user, theme, setTheme, notify } = useApp();
+  const { user, theme, setTheme, notify, notificationCount } = useApp();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [globalSearch, setGlobalSearch] = useState("");
   const location = useLocation();
+  const navigate = useNavigate();
   const current = navigation.find(item => location.pathname.startsWith(item.path)) || navigation[3];
   const initials = (user.displayName || user.email || "C").slice(0, 1).toUpperCase();
+  const resolvedTheme = theme === "system"
+    ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+    : theme;
+  const mobileItems = [navigation.find(item => item.path === "/home"), navigation.find(item => item.path === "/career"), navigation.find(item => item.path === "/notifications"), navigation.find(item => item.path === "/resume")];
+  const mobileMoreItems = navigation.filter(item => !mobileItems.some(visible => visible.path === item.path));
+  const moreIsActive = mobileMoreItems.some(item => location.pathname.startsWith(item.path));
   const logout = async () => {
     await signOut(auth);
     window.location.assign("/");
   };
   const toggleTheme = async () => {
-    const nextTheme = theme === "dark" ? "light" : "dark";
+    const nextTheme = resolvedTheme === "dark" ? "light" : "dark";
     setTheme(nextTheme);
     try {
       await api("/settings", jsonRequest("PATCH", { theme: nextTheme }));
@@ -200,7 +223,7 @@ function AppLayout() {
   return (
     <div className={`app-shell min-h-screen text-ink ${location.pathname.startsWith("/career") ? "career-intelligence-shell" : ""}`}>
       {mobileOpen && <button className="mobile-overlay fixed inset-0 z-30 md:hidden" aria-label="Close menu" onClick={() => setMobileOpen(false)}/>}
-      <aside className={`app-sidebar fixed inset-y-0 left-0 z-40 flex w-[270px] flex-col px-4 py-5 text-slate-100 shadow-xl transition-all md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"} ${collapsed ? "md:w-[86px]" : "md:w-[270px]"}`}>
+      <aside className={`app-sidebar fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col px-4 py-5 text-slate-100 shadow-xl transition-all md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"} ${collapsed ? "md:w-[72px]" : "md:w-[230px]"}`}>
         <div className="sidebar-brand mb-7 flex items-center justify-between px-2">
           <Link to="/resume" className={`flex items-center gap-3 ${collapsed ? "md:justify-center" : ""}`}>
             <span className="brand-mark grid h-10 w-10 shrink-0 place-items-center rounded-xl font-extrabold">CI</span>
@@ -216,8 +239,8 @@ function AppLayout() {
               {section.items.map(({ path, label, icon: Icon }) => {
                 const active = location.pathname.startsWith(path);
                 return <Link key={path} to={path} onClick={() => setMobileOpen(false)} title={collapsed ? label : undefined} aria-current={active ? "page" : undefined}
-                  className={`nav-link flex min-h-11 items-center gap-3 rounded-xl px-3 text-[13px] font-medium transition ${active ? "bg-[#6658c9] text-white shadow-lg shadow-indigo-950/25" : "text-slate-300 hover:bg-white/[.07] hover:text-white"} ${collapsed ? "md:justify-center md:px-0" : ""}`}>
-                  <Icon size={18} strokeWidth={1.8} className="shrink-0"/><span className={collapsed ? "md:hidden" : ""}>{label}</span>
+                  className={`nav-link flex min-h-11 items-center gap-3 rounded-xl px-3 text-[13px] font-medium transition ${active ? "bg-blue-600 text-white shadow-sm" : "text-slate-300 hover:bg-white/[.07] hover:text-white"} ${collapsed ? "md:justify-center md:px-0" : ""}`}>
+                  <Icon size={18} strokeWidth={1.8} className="shrink-0"/><span className={collapsed ? "md:hidden" : ""}>{label}</span>{path === "/notifications" && notificationCount > 0 && <span className={`ml-auto min-w-5 rounded-full px-1.5 py-0.5 text-center text-[10px] font-bold ${active ? "bg-white/20 text-white" : "bg-violet-100 text-violet-700"}`}>{notificationCount > 99 ? "99+" : notificationCount}</span>}
                 </Link>;
               })}
             </div>
@@ -229,47 +252,37 @@ function AppLayout() {
           <button onClick={logout} title="Log out" className={`rounded-lg p-2 text-slate-400 hover:bg-white/10 hover:text-white ${collapsed ? "md:hidden" : ""}`}><LogOut size={16}/></button>
         </div>
       </aside>
-      <div className={`app-content min-h-screen transition-[padding] md:pl-[270px] ${collapsed ? "md:pl-[86px]" : ""}`}>
-        <header className="sticky top-0 z-20 flex h-[78px] items-center justify-between border-b border-slate-100 bg-white/90 px-4 backdrop-blur md:px-8">
-          <div className="flex items-center gap-3">
+      <div className={`app-content min-h-screen transition-[padding] md:pl-[230px] ${collapsed ? "md:pl-[72px]" : ""}`}>
+        <header className="app-topbar sticky top-0 z-20 flex min-h-[72px] items-center justify-between gap-4 border-b border-slate-100 px-4 md:px-8">
+          <div className="flex min-w-0 items-center gap-3">
             <button onClick={() => setMobileOpen(true)} className="rounded-xl border border-slate-200 p-2 md:hidden" aria-label="Open menu"><Menu size={19}/></button>
-            <div><div className="text-[10px] font-semibold uppercase tracking-[.17em] text-slate-400">CareerInfinity workspace</div><h1 className="mt-1 text-[17px] font-bold text-slate-800">{current.label}</h1></div>
+            <div className="min-w-0"><div className="text-xs font-medium text-slate-500">Career workspace</div><h1 className="truncate text-[17px] font-bold text-slate-800">{current.label}</h1></div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="hidden max-w-48 truncate text-xs text-slate-500 sm:block">{user.displayName || user.email}</span>
-            <button onClick={toggleTheme} title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} aria-pressed={theme === "dark"} className="rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50"><Moon size={17}/></button>
-            <div className="grid h-9 w-9 place-items-center rounded-full bg-violet-100 text-sm font-bold text-violet-700">{initials}</div>
+          <Link to="/notifications" className="header-search-shortcut md:hidden" aria-label="Search jobs and alerts"><Search size={18}/></Link>
+          <form className="header-search hidden min-w-48 max-w-[360px] flex-1 md:flex" role="search" onSubmit={event => { event.preventDefault(); navigate(`/notifications?search=${encodeURIComponent(globalSearch.trim())}`); }}>
+            <Search size={17} aria-hidden="true"/><input aria-label="Search jobs and notifications" value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} placeholder="Search jobs and alerts"/>
+          </form>
+          <div className="flex shrink-0 items-center gap-2">
+            <button onClick={toggleTheme} title={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} theme`} aria-label={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} theme`} aria-pressed={resolvedTheme === "dark"} className="theme-toggle-button"><Moon size={17}/></button>
+            <details className="avatar-menu"><summary aria-label="Open account menu"><span className="avatar-circle">{initials}</span><span className="hidden max-w-36 truncate text-xs text-slate-600 lg:block">{user.displayName || user.email}</span></summary><div className="avatar-dropdown"><p className="truncate">{user.email}</p><Link to="/settings">Profile & settings</Link><button onClick={logout}>Sign out</button></div></details>
           </div>
         </header>
-        <main className="mx-auto max-w-[1500px] px-4 py-7 md:px-8 md:py-9"><Outlet/></main>
+        <main className="app-main mx-auto max-w-[1100px] px-4 py-6 md:px-8 md:py-8"><Outlet/></main>
       </div>
+      <nav className="mobile-tabbar" aria-label="Main navigation">
+        {mobileItems.map(({ path, label, icon: Icon }) => {
+          const active = location.pathname.startsWith(path);
+          const mobileLabel = path === "/notifications" ? "Alerts" : path === "/home" ? "Home" : path === "/career" ? "Career" : "Resume";
+          return <Link key={path} to={path} onClick={() => setMoreOpen(false)} aria-current={active ? "page" : undefined} className="mobile-tab-link"><span className="mobile-tab-icon"><Icon size={20}/>{path === "/notifications" && notificationCount > 0 && <i aria-label={`${notificationCount} unread`} className="mobile-unread-dot"/>}</span><span>{mobileLabel}</span></Link>;
+        })}
+        <div className="mobile-more-wrap"><button type="button" aria-expanded={moreOpen} aria-haspopup="menu" onClick={() => setMoreOpen(value => !value)} className="mobile-tab-link" aria-current={moreIsActive ? "page" : undefined}><span className="mobile-tab-icon"><MoreHorizontal size={20}/></span><span>More</span></button>{moreOpen && <div className="mobile-more-menu" role="menu">{mobileMoreItems.map(({ path, label, icon: Icon }) => <Link key={path} to={path} role="menuitem" onClick={() => setMoreOpen(false)} aria-current={location.pathname.startsWith(path) ? "page" : undefined}><Icon size={17}/>{label}</Link>)}</div>}</div>
+      </nav>
     </div>
   );
 }
 
-function PageTitle({ eyebrow = "CAREER WORKSPACE", title, subtitle, action }) {
-  return <div className="page-title mb-6 flex flex-wrap items-end justify-between gap-4"><div><p className="mb-2 text-[10px] font-bold uppercase tracking-[.18em] text-violet-600">{eyebrow}</p><h2 className="text-2xl font-extrabold tracking-tight text-slate-900 md:text-[28px]">{title}</h2>{subtitle && <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">{subtitle}</p>}</div>{action}</div>;
-}
-
-function Card({ children, className = "" }) {
-  return <section className={`glass-card rounded-2xl border border-slate-100 bg-white p-5 shadow-soft md:p-6 ${className}`}>{children}</section>;
-}
-
-function Button({ children, className = "", variant = "primary", ...props }) {
-  const styles = variant === "primary" ? "bg-violet-600 text-white shadow-lg shadow-violet-200 hover:bg-violet-700" : variant === "danger" ? "bg-rose-50 text-rose-700 hover:bg-rose-100" : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50";
-  return <button className={`ui-button inline-flex min-h-10 items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${styles} ${className}`} {...props}>{children}</button>;
-}
-
-function TextInput({ label, className = "", ...props }) {
-  return <label className="grid gap-1.5 text-xs font-semibold text-slate-600">{label}<input className={`h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 outline-none transition focus:border-violet-400 focus:ring-4 focus:ring-violet-100 ${className}`} {...props}/></label>;
-}
-
-function SelectInput({ label, options, className = "", ...props }) {
-  return <label className="grid gap-1.5 text-xs font-semibold text-slate-600">{label}<select className={`h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 outline-none focus:border-violet-400 focus:ring-4 focus:ring-violet-100 ${className}`} {...props}>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
-}
-
-function TextArea({ label, className = "", ...props }) {
-  return <label className="grid gap-1.5 text-xs font-semibold text-slate-600">{label}<textarea className={`w-full rounded-xl border border-slate-200 bg-white p-3 text-sm font-normal text-slate-800 outline-none focus:border-violet-400 focus:ring-4 focus:ring-violet-100 ${className}`} {...props}/></label>;
+function PageTitle({ title, subtitle, action }) {
+  return <div className="page-title mb-6 flex flex-wrap items-end justify-between gap-4"><div><h2 className="text-2xl font-extrabold tracking-tight text-slate-900 md:text-[30px]">{title}</h2>{subtitle && <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">{subtitle}</p>}</div>{action}</div>;
 }
 
 function ErrorState({ message, onRetry }) {
@@ -284,31 +297,25 @@ function ErrorState({ message, onRetry }) {
   return <div className="rounded-xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-700" role="alert"><div className="flex flex-wrap items-start justify-between gap-3"><span>{message}</span><div className="flex shrink-0 items-center gap-4">{sessionExpired && <button type="button" onClick={signInAgain} className="font-semibold underline">Sign in again</button>}{onRetry && <button type="button" onClick={onRetry} className="font-semibold underline">Retry</button>}</div></div></div>;
 }
 
-function EmptyState({ icon: Icon = FileText, title, description, action }) {
-  return <div className="empty-state grid min-h-48 place-items-center rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 p-7 text-center"><div><span className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-violet-50 text-violet-600"><Icon size={22}/></span><h3 className="text-sm font-bold text-slate-800">{title}</h3><p className="mx-auto mt-1 max-w-md text-xs leading-5 text-slate-500">{description}</p>{action && <div className="mt-4">{action}</div>}</div></div>;
-}
-
 function StatCard({ label, value, note, icon: Icon, tone = "violet" }) {
-  const colors = { violet: "bg-violet-50 text-violet-600", green: "bg-emerald-50 text-emerald-600", amber: "bg-amber-50 text-amber-600", blue: "bg-blue-50 text-blue-600" };
-  return <Card className="stat-card p-5"><div className="flex items-start justify-between"><div><p className="text-xs font-semibold text-slate-500">{label}</p><div className="mt-3 text-2xl font-extrabold tracking-tight text-slate-900">{value}</div><p className="mt-1 text-[11px] text-slate-400">{note}</p></div><span className={`grid h-10 w-10 place-items-center rounded-xl ${colors[tone]}`}><Icon size={19}/></span></div></Card>;
+  return <Card className="stat-card p-5"><div className="flex items-start justify-between"><div><p className="text-xs font-semibold text-slate-500">{label}</p><div className="mt-3 text-2xl font-extrabold tracking-tight text-slate-900">{value}</div><p className="mt-1 text-[11px] text-slate-400">{note}</p></div><span className={`stat-icon stat-icon-${tone}`}><Icon size={19}/></span></div></Card>;
 }
 
 function ScoreGauge({ score = 0, label = "Resume score", estimated = false }) {
   const value = Math.max(0, Math.min(estimated ? 99 : 100, Number(score) || 0));
-  const color = value >= 80 ? "#16a37a" : value >= 55 ? "#e59a30" : "#e25c67";
+  const color = value >= 80 ? "var(--success)" : value >= 55 ? "var(--warning)" : "var(--danger)";
   const circumference = 2 * Math.PI * 43;
   return <div className="relative mx-auto h-36 w-36"><svg viewBox="0 0 100 100" className="h-full w-full -rotate-90" role="img" aria-label={`${value} out of 100 ${label}`}><circle cx="50" cy="50" r="43" fill="none" stroke="var(--line)" strokeWidth="8"/><circle cx="50" cy="50" r="43" fill="none" stroke={color} strokeWidth="8" strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={circumference * (1 - value / 100)} className="transition-all duration-700"/></svg><div className="absolute inset-0 grid place-content-center text-center"><strong className="text-3xl font-extrabold text-slate-900">{value}<span className="text-sm text-slate-400">/100</span></strong><span className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">{value >= 80 ? "Strong signal" : value >= 55 ? "Developing" : "Needs work"}</span></div></div>;
 }
 
 function ProgressBar({ label, score, detail, estimated = false }) {
   const value = Math.max(0, Math.min(estimated ? 99 : 100, Number(score) || 0));
-  const color = value >= 75 ? "bg-emerald-500" : value >= 45 ? "bg-amber-400" : "bg-rose-400";
-  return <div className="mb-4"><div className="mb-1.5 flex items-center justify-between gap-3 text-xs"><span className="font-semibold text-slate-700">{label}</span><span className="font-bold tabular-nums text-slate-700">{value}%</span></div><div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${color}`} style={{ width: `${value}%` }}/></div>{detail && <p className="mt-1 text-[10px] leading-4 text-slate-400">{detail}</p>}</div>;
+  const color = value >= 75 ? "var(--success)" : value >= 45 ? "var(--warning)" : "var(--danger)";
+  return <div className="mb-4"><div className="mb-1.5 flex items-center justify-between gap-3 text-xs"><span className="font-semibold text-slate-700">{label}</span><span className="font-bold tabular-nums text-slate-700">{value}%</span></div><div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full" style={{ width: `${value}%`, background: color }}/></div>{detail && <p className="mt-1 text-[10px] leading-4 text-slate-400">{detail}</p>}</div>;
 }
 
 function SkillChip({ children, tone = "neutral" }) {
-  const tones = { matched: "bg-emerald-50 text-emerald-700 ring-emerald-100", missing: "bg-rose-50 text-rose-700 ring-rose-100", weak: "bg-amber-50 text-amber-700 ring-amber-100", neutral: "bg-slate-100 text-slate-600 ring-slate-200" };
-  return <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ring-inset ${tones[tone]}`}>{children}</span>;
+  return <span className={`skill-chip skill-chip-${tone}`}>{children}</span>;
 }
 
 function JourneyStep({ icon: Icon, label, status, last = false }) {
@@ -319,12 +326,9 @@ function JourneyStep({ icon: Icon, label, status, last = false }) {
   </div>;
 }
 
-function Loading({ label = "Loading..." }) {
-  return <div className="flex min-h-28 items-center justify-center gap-2 text-sm text-slate-400"><LoaderCircle size={18} className="animate-spin"/>{label}</div>;
-}
-
 function DashboardPage() {
-  const { summary, summaryError, refreshSummary } = useApp();
+  const { summary, summaryError, refreshSummary, user } = useApp();
+  const { data: notificationSummary } = useResource(() => api("/notifications?category=all&status=all&limit=1"));
   const analysis = summary?.analysis?.data;
   const roleMatches = summary?.role_matches?.roles || [];
   const skills = summary?.detected_skills || [];
@@ -348,7 +352,7 @@ function DashboardPage() {
   const bestMatchScore = Math.min(99, Math.max(0, Number(bestMatch?.match_score) || 0));
   const nextPathPercent = Math.round((completed.filter(Boolean).length / completed.length) * 100);
   return <>
-    <PageTitle title="Welcome back" subtitle="A clear view of your next steps, growing skills, and opportunities." action={<Button onClick={refreshSummary}><Activity size={15}/>Refresh overview</Button>}/>
+    <PageTitle title={`Welcome back${user.displayName || summary?.profile?.name ? `, ${user.displayName || summary.profile.name}` : ""}`} subtitle="A clear view of your next steps, growing skills, and opportunities." action={<Button onClick={refreshSummary}><Activity size={15}/>Refresh overview</Button>}/>
     {summaryError && <ErrorState message={summaryError} onRetry={refreshSummary}/>}
     <Card className="journey-card mb-5">
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -365,7 +369,13 @@ function DashboardPage() {
         ].map((step, index) => <JourneyStep key={step.label} {...step} status={completed[index] ? "done" : index === currentStepIndex ? "current" : "upcoming"} last={index === completed.length - 1}/>)}
       </div>
     </Card>
-    <div className="mb-5 grid gap-4 md:grid-cols-3">
+    <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <StatCard label="Job matches" value={notificationSummary?.stats?.job_alerts ?? "—"} note="Listings in your alerts" icon={BriefcaseBusiness} tone="blue"/>
+      <StatCard label="Application updates" value={notificationSummary?.stats?.application_updates ?? "—"} note="Updates in your inbox" icon={Check} tone="green"/>
+      <StatCard label="Interview updates" value={notificationSummary?.category_counts?.interview ?? 0} note="Interview notifications" icon={MessageSquareText} tone="amber"/>
+      <StatCard label="Profile strength" value={analysis?.profile_strength != null ? `${analysis.profile_strength}%` : "—"} note={analysis ? "Estimated from your resume" : "Analyse a resume to get a score"} icon={UserRound} tone="violet"/>
+    </div>
+    <div className="mb-5 grid gap-4 md:grid-cols-2">
       <Card className="dashboard-stat dashboard-match">
         <div><p className="text-xs font-semibold text-slate-500">Best career match</p><h3 className="mt-2 text-base font-bold text-slate-900">{bestMatch?.role || "Explore your fit"}</h3><p className="mt-1 text-[11px] text-slate-500">{bestMatch ? "Based on resume skill keywords" : "Analyse a resume to see role matches"}</p></div>
         <div className="match-ring" style={{ "--match-score": `${bestMatch ? bestMatchScore : 0}%` }} aria-label={bestMatch ? `${bestMatchScore}% estimated match` : "No career match yet"}><span>{bestMatch ? `${bestMatchScore}%` : "—"}</span></div>
@@ -390,8 +400,8 @@ function DashboardPage() {
         </Link>)}</div> : <EmptyState icon={Target} title="Your career matches will appear here" description="Upload and analyse your resume to see roles that fit your skills." action={<Link className="text-xs font-semibold text-violet-700" to="/resume">Upload and analyse</Link>}/>}
       </Card>
       <Card>
-        <div className="mb-4"><h3 className="font-bold text-slate-900">Skills found</h3><p className="mt-1 text-xs text-slate-500">Keywords detected in your latest resume</p></div>
-        {skills.length ? <div className="flex flex-wrap gap-2">{skills.slice(0, 24).map(skill => <SkillChip key={skill} tone="matched">{skill}</SkillChip>)}</div> : <EmptyState icon={Sparkles} title="No skills detected yet" description="Add a resume to see the skill keywords identified by the analyser." action={<Link className="text-xs font-semibold text-violet-700" to="/resume">Upload your resume</Link>}/>}
+        <div className="mb-4"><h3 className="font-bold text-slate-900">Skills to develop</h3><p className="mt-1 text-xs text-slate-500">Gaps for your current best-fit role</p></div>
+        {roleMatches[0]?.missing_skills?.length ? <><div className="flex flex-wrap gap-2">{roleMatches[0].missing_skills.slice(0, 8).map(skill => <SkillChip key={skill} tone="missing">{skill}</SkillChip>)}</div><Link className="mt-4 inline-flex items-center gap-1 text-sm font-semibold text-violet-700" to={`/roadmap?role=${encodeURIComponent(roleMatches[0].role)}`}>Start learning <ArrowRight size={15}/></Link></> : skills.length ? <div className="flex flex-wrap gap-2">{skills.slice(0, 18).map(skill => <SkillChip key={skill} tone="matched">{skill}</SkillChip>)}</div> : <EmptyState icon={Sparkles} title="Your skill gaps will appear here" description="Analyze a resume to compare your skills with a career path." action={<Link className="text-xs font-semibold text-violet-700" to="/resume">Upload your resume</Link>}/>}
       </Card>
     </div>
     <div className="grid gap-5 xl:grid-cols-2">
@@ -402,6 +412,94 @@ function DashboardPage() {
       </div></Card>
       <Card><h3 className="font-bold">Recent activity</h3><p className="mb-4 mt-1 text-xs text-slate-500">Your latest CareerInfinity actions</p>{summary?.recent_activity?.length ? <div className="space-y-4">{summary.recent_activity.map((item, index) => <div key={`${item.title}-${index}`} className="flex gap-3"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-violet-50 text-violet-600"><Activity size={15}/></span><div><strong className="block text-xs text-slate-700">{item.title}</strong><span className="text-[10px] text-slate-500">{new Date(item.date).toLocaleString()}</span></div></div>)}</div> : <EmptyState icon={Activity} title="Your activity will appear here" description="Analyse your resume or start a mock interview to get going."/ >}</Card>
     </div>
+  </>;
+}
+
+function ApplicationsPage() {
+  const { data, loading, error, reload } = useResource(() => api("/notifications?category=application&status=all&sort=newest&limit=50"));
+  const { notify } = useApp();
+  const updates = data?.notifications || [];
+  const markRead = async item => {
+    if (item.is_read) return;
+    try { await api(`/notifications/${encodeURIComponent(item.id)}/read`, { method: "PATCH" }); await reload(); }
+    catch (failure) { notify(`Unable to update this alert: ${failure.message}`); }
+  };
+  return <>
+    <PageTitle title="Applications" subtitle="Follow application updates saved to your CareerInfinity notifications." action={<Link to="/notifications" className="ui-button ui-button-secondary">Open notifications <ArrowRight size={16}/></Link>}/>
+    <div className="mb-5 grid gap-4 sm:grid-cols-2">
+      <StatCard label="Application updates" value={data?.total ?? "—"} note="Updates currently in your account" icon={BriefcaseBusiness} tone="blue"/>
+      <StatCard label="Unread updates" value={data?.unread ?? "—"} note="Updates to review" icon={Bell} tone="amber"/>
+    </div>
+    {loading && <Loading label="Loading application updates…"/>}
+    {error && <ErrorState message={error} onRetry={reload}/>}
+    {data && (updates.length ? <div className="application-updates" aria-live="polite">
+      {updates.map(item => <Card key={item.id} className="application-update-card">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="application-update-icon"><BriefcaseBusiness size={19}/></span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2"><h3>{item.title}</h3>{!item.is_read && <span className="status-chip status-chip-new">New update</span>}</div>
+            {item.company_name && <p className="application-company">{item.company_name}</p>}
+            <p className="application-message">{item.message}</p>
+            <time className="application-date" dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+          </div>
+          <button type="button" className="ui-button ui-button-ghost application-read-button" disabled={item.is_read} onClick={() => markRead(item)}>{item.is_read ? "Read" : "Mark as read"}</button>
+        </div>
+      </Card>)}
+    </div> : <EmptyState icon={BriefcaseBusiness} title="No application updates yet" description="When an application update is added to your account, it will appear here. Job alerts and career updates are available in Notifications." action={<Link to="/notifications" className="ui-button ui-button-primary">View notifications</Link>}/>)}
+  </>;
+}
+
+function ProfilePage() {
+  const { data, loading, error, reload } = useResource(async () => {
+    const [profileData, settings] = await Promise.all([api("/api/profile"), api("/settings")]);
+    return { ...profileData, availableRoles: settings.available_roles || [] };
+  });
+  const { notify } = useApp();
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data?.profile) setForm({ ...data.profile }); }, [data]);
+  const analysis = data?.analysis?.data;
+  const skills = analysis?.skills || [];
+  const strength = Number(analysis?.profile_strength) || 0;
+  const save = async event => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      const payload = { ...form, graduation_year: form.graduation_year ? Number(form.graduation_year) : "" };
+      await api("/api/profile", jsonRequest("PATCH", { profile: payload }));
+      notify("Profile saved.");
+      await reload();
+    } catch (failure) { notify(`Unable to save your profile: ${failure.message}`); }
+    finally { setSaving(false); }
+  };
+  return <>
+    <PageTitle title="Your profile" subtitle="Keep your details current so your career insights stay relevant." action={<Link to="/documents" className="ui-button ui-button-secondary"><FileText size={16}/>Resume documents</Link>}/>
+    {loading && !form && <Loading label="Loading your profile…"/>}
+    {error && <ErrorState message={error} onRetry={reload}/>}
+    {form && <>
+      <Card className="profile-hero mb-5">
+        <span className="profile-avatar">{(form.name || "C").trim().slice(0, 1).toUpperCase()}</span>
+        <div className="min-w-0 flex-1"><p className="profile-kicker">Career profile</p><h2>{form.name || "Add your name"}</h2><p>{form.target_role || "Choose a target role to personalize your workspace."}</p></div>
+        <div className="profile-strength"><div className="flex items-center justify-between gap-3"><span>Profile strength</span><strong>{analysis ? `${strength}%` : "Not scored"}</strong></div><div className="profile-strength-track" role="progressbar" aria-label="Profile strength" aria-valuenow={strength} aria-valuemin="0" aria-valuemax="100"><span style={{ width: `${strength}%` }}/></div><small>{analysis ? "Estimated from your analyzed resume" : "Analyze a resume to see your profile score"}</small></div>
+      </Card>
+      <form onSubmit={save} className="profile-layout">
+        <Card><div className="profile-section-heading"><h3>About you</h3><p>Basic details for your career workspace.</p></div><div className="grid gap-4 sm:grid-cols-2">
+          <TextInput label="Full name" autoComplete="name" maxLength={200} value={form.name || ""} onChange={event => setForm({ ...form, name: event.target.value })}/>
+          <SelectInput label="Target role" value={form.target_role || ""} onChange={event => setForm({ ...form, target_role: event.target.value })} options={[{ value: "", label: "Choose a role" }, ...(data.availableRoles || []).map(value => ({ value, label: value }))]}/>
+          <TextInput label="Education" maxLength={200} value={form.education || ""} onChange={event => setForm({ ...form, education: event.target.value })}/>
+          <TextInput label="Graduation year" inputMode="numeric" maxLength={4} value={form.graduation_year || ""} onChange={event => setForm({ ...form, graduation_year: event.target.value.replace(/\D/g, "").slice(0, 4) })}/>
+        </div></Card>
+        <Card><div className="profile-section-heading"><h3>Professional links</h3><p>Add links you want to keep with your profile.</p></div><div className="grid gap-4">
+          <TextInput label="GitHub profile" type="url" placeholder="https://github.com/username" value={form.github || ""} onChange={event => setForm({ ...form, github: event.target.value })}/>
+          <TextInput label="LinkedIn profile" type="url" placeholder="https://linkedin.com/in/username" value={form.linkedin || ""} onChange={event => setForm({ ...form, linkedin: event.target.value })}/>
+          <p className="profile-privacy-note"><Link2 size={15}/> GitHub and LinkedIn links are saved to your private CareerInfinity profile.</p>
+        </div></Card>
+        <Card className="sm:col-span-2"><div className="flex flex-wrap items-start justify-between gap-3"><div className="profile-section-heading"><h3>Skills</h3><p>Detected from your latest resume analysis.</p></div><Link to="/resume" className="text-sm font-semibold text-violet-700">Analyze resume</Link></div>
+          {skills.length ? <div className="flex flex-wrap gap-2">{skills.map(skill => <SkillChip key={skill.name} tone={skill.level === "Strong" ? "matched" : skill.level === "Intermediate" ? "weak" : "neutral"}>{skill.name}</SkillChip>)}</div> : <p className="text-sm text-slate-500">No analyzed resume skills yet. Upload your resume to see them here.</p>}
+        </Card>
+        <div className="profile-form-actions sm:col-span-2"><Button variant="secondary" type="button" onClick={() => setForm({ ...data.profile })}>Cancel</Button><Button type="submit" loading={saving}>Save changes</Button></div>
+      </form>
+    </>}
   </>;
 }
 
@@ -870,10 +968,11 @@ function SettingsPage() {
   const { data, loading, error, reload } = useResource(() => api("/settings"));
   const { notify, theme, setTheme } = useApp();
   const [form, setForm] = useState(null);
+  const [activeSettingsTab, setActiveSettingsTab] = useState("profile");
   useEffect(() => {
     if (!data) return;
     setForm(data);
-    if (data.theme) setTheme(data.theme);
+    if (data.theme && localStorage.getItem("careerInfinity:theme") !== "system") setTheme(data.theme);
   }, [data, setTheme]);
   const save = async event => {
     event.preventDefault();
@@ -883,23 +982,38 @@ function SettingsPage() {
       education: form.education || "",
       preferred_location: form.preferred_location || "",
       notifications_enabled: form.notifications_enabled !== false,
-      theme,
+      theme: theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme,
     };
     try { await api("/settings", jsonRequest("PATCH", payload)); notify("Settings saved."); reload(); }
-    catch (failure) { alert(failure.message); }
+    catch (failure) { notify(`Unable to save settings: ${failure.message}`); }
   };
   return <>
-    <PageTitle title="Settings" subtitle="Manage your profile, career preferences, notifications, and appearance."/>
+    <PageTitle title="Profile & settings" subtitle="Keep your career details, alerts, and appearance up to date."/>
     {loading && <Loading/>}{error && <ErrorState message={error} onRetry={reload}/>}
-    {form && <Card className="max-w-3xl"><form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
-      <TextInput label="Name" value={form.name || ""} onChange={event => setForm({...form,name:event.target.value})}/>
-      <SelectInput label="Target role" value={form.target_role || ""} onChange={event => setForm({...form,target_role:event.target.value})} options={["",...(form.available_roles || [])].map(value=>({value,label:value || "Choose a role"}))}/>
-      <TextInput label="Preferred location" value={form.preferred_location || ""} onChange={event => setForm({...form,preferred_location:event.target.value})}/>
-      <TextInput label="Education" value={form.education || ""} onChange={event => setForm({...form,education:event.target.value})}/>
-      <div className="sm:col-span-2"><h3 className="mb-2 text-sm font-bold">Notifications</h3><label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={form.notifications_enabled !== false} onChange={event => setForm({...form,notifications_enabled:event.target.checked})}/>Email me important placement updates</label></div>
-      <SelectInput label="Theme" value={theme} onChange={event => { setTheme(event.target.value); setForm({...form,theme:event.target.value}); }} options={[{value:"light",label:"Light"},{value:"dark",label:"Dark"}]}/>
-      <div className="sm:col-span-2"><Button type="submit">Save settings</Button></div>
-    </form></Card>}
+    {form && <Card className="settings-card max-w-3xl">
+      <div className="settings-tabs" role="tablist" aria-label="Profile and settings">
+        {[ ["profile", "Profile"], ["notifications", "Notifications"], ["appearance", "Appearance"] ].map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={activeSettingsTab === key} onClick={() => setActiveSettingsTab(key)}>{label}</button>)}
+      </div>
+      <form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
+        {activeSettingsTab === "profile" && <>
+          <div className="settings-section-heading sm:col-span-2"><h3>Your profile</h3><p>These details help tailor your career workspace.</p></div>
+          <TextInput label="Name" autoComplete="name" value={form.name || ""} onChange={event => setForm({...form,name:event.target.value})}/>
+          <SelectInput label="Target role" value={form.target_role || ""} onChange={event => setForm({...form,target_role:event.target.value})} options={["",...(form.available_roles || [])].map(value=>({value,label:value || "Choose a role"}))}/>
+          <TextInput label="Preferred location" autoComplete="address-level2" value={form.preferred_location || ""} onChange={event => setForm({...form,preferred_location:event.target.value})}/>
+          <TextInput label="Education" value={form.education || ""} onChange={event => setForm({...form,education:event.target.value})}/>
+        </>}
+        {activeSettingsTab === "notifications" && <>
+          <div className="settings-section-heading sm:col-span-2"><h3>Notification preferences</h3><p>Choose which in-app career updates you want to see.</p></div>
+          <label className="settings-option sm:col-span-2"><span><strong>Placement updates</strong><small>Receive important placement and opportunity alerts in CareerInfinity.</small></span><input type="checkbox" checked={form.notifications_enabled !== false} onChange={event => setForm({...form,notifications_enabled:event.target.checked})}/></label>
+          <p className="sm:col-span-2 text-xs text-slate-500">Email delivery is not connected. This setting controls in-app updates only.</p>
+        </>}
+        {activeSettingsTab === "appearance" && <>
+          <div className="settings-section-heading sm:col-span-2"><h3>Appearance</h3><p>Choose a theme, or follow your device setting.</p></div>
+          <SelectInput label="Theme" value={theme} onChange={event => { setTheme(event.target.value); setForm({...form,theme:event.target.value}); }} options={[{value:"system",label:"System"},{value:"light",label:"Light"},{value:"dark",label:"Dark"}]}/>
+        </>}
+        <div className="settings-actions sm:col-span-2"><Button type="submit">Save changes</Button></div>
+      </form>
+    </Card>}
   </>;
 }
 

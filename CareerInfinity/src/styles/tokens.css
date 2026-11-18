@@ -1,0 +1,86 @@
+:root {
+  color-scheme: light;
+  --bg: #EEF1F6;
+  --surface: #FFFFFF;
+  --ink: #14213D;
+  --muted: #566280;
+  --line: #DCE2EE;
+  --brand: #2B59FF;
+  --brand-strong: #2148D8;
+  --brand-ink: #FFFFFF;
+  --success: #0B8F63;
+  --success-bg: #DDF5EA;
+  --warning: #F2A33A;
+  --danger: #D64545;
+  --chip: #E9EEFB;
+  --panel: color-mix(in srgb, var(--surface) 68%, transparent);
+  --panel-solid: var(--surface);
+  --edge: color-mix(in srgb, white 68%, var(--line));
+  --soft: color-mix(in srgb, var(--brand) 10%, transparent);
+  --side: color-mix(in srgb, var(--surface) 68%, transparent);
+  --shadow: 0 8px 28px rgba(20, 33, 61, .10);
+  --font-heading: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-body: "Figtree", system-ui, sans-serif;
+  font-family: var(--font-body);
+  color: var(--ink);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0E1424;
+  --surface: #161E33;
+  --ink: #E7ECF8;
+  --muted: #9AA6C1;
+  --line: #26304B;
+  --brand: #7E98FF;
+  --brand-strong: #627FE9;
+  --brand-ink: #0E1424;
+  --success: #3DD9A0;
+  --success-bg: #12332A;
+  --warning: #F2A33A;
+  --danger: #FF7A7A;
+  --chip: #1F2A47;
+  --panel: color-mix(in srgb, var(--surface) 72%, transparent);
+  --panel-solid: var(--surface);
+  --edge: color-mix(in srgb, white 12%, var(--line));
+  --soft: color-mix(in srgb, var(--brand) 16%, transparent);
+  --side: color-mix(in srgb, var(--surface) 82%, transparent);
+  --shadow: 0 10px 32px rgba(0, 0, 0, .28);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0E1424;
+    --surface: #161E33;
+    --ink: #E7ECF8;
+    --muted: #9AA6C1;
+    --line: #26304B;
+    --brand: #7E98FF;
+    --brand-strong: #627FE9;
+    --brand-ink: #0E1424;
+    --success: #3DD9A0;
+    --success-bg: #12332A;
+    --warning: #F2A33A;
+    --danger: #FF7A7A;
+    --chip: #1F2A47;
+    --panel: color-mix(in srgb, var(--surface) 72%, transparent);
+    --panel-solid: var(--surface);
+    --edge: color-mix(in srgb, white 12%, var(--line));
+    --soft: color-mix(in srgb, var(--brand) 16%, transparent);
+    --side: color-mix(in srgb, var(--surface) 82%, transparent);
+    --shadow: 0 10px 32px rgba(0, 0, 0, .28);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root { --panel: var(--surface); --side: var(--surface); }
+  :root[data-theme="dark"] { --panel: var(--surface); --side: var(--surface); }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root { --panel: var(--surface); --side: var(--surface); }
+}
