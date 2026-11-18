@@ -76,6 +76,7 @@ ROADMAPS_PATH = APP_DIR / "roadmaps.json"
 ROADMAP_PROGRESS_MIGRATION_PATH = APP_DIR / "migrations" / "001_user_progress.sql"
 NOTIFICATIONS_SQLITE_MIGRATION_PATH = APP_DIR / "migrations" / "002_notifications.sqlite.sql"
 NOTIFICATION_JOB_DETAILS_MIGRATION_PATH = APP_DIR / "migrations" / "003_notification_job_details.sql"
+JOB_APPLICATIONS_MIGRATION_PATH = APP_DIR / "migrations" / "004_job_applications.sql"
 MAX_PROOF_SIZE = 5 * 1024 * 1024
 CAREER_INTELLIGENCE_CACHE_TTL_SECONDS = 30
 CAREER_INTELLIGENCE_CACHE_MAX_ENTRIES = 128
@@ -486,6 +487,8 @@ def get_database():
                 migration_connection.executescript(notification_migration)
                 job_details_migration = NOTIFICATION_JOB_DETAILS_MIGRATION_PATH.read_text(encoding="utf-8")
                 migration_connection.executescript(job_details_migration)
+                application_migration = JOB_APPLICATIONS_MIGRATION_PATH.read_text(encoding="utf-8")
+                migration_connection.executescript(application_migration)
                 detail_columns = {row[1] for row in migration_connection.execute("PRAGMA table_info(notification_job_details)")}
                 if "salary_label" not in detail_columns:
                     migration_connection.execute("ALTER TABLE notification_job_details ADD COLUMN salary_label TEXT")
@@ -2475,6 +2478,9 @@ def notification_record(row):
         "match_percentage": row["match_percentage"], "is_read": bool(row["is_read"]),
         "action_url": row["action_url"], "created_at": row["created_at"],
         "is_demo": bool(row["is_demo"]), "job": job,
+        "is_applied": row["application_status"] is not None if "application_status" in row.keys() else False,
+        "application_status": row["application_status"] if "application_status" in row.keys() else None,
+        "application_updated_at": row["application_updated_at"] if "application_updated_at" in row.keys() else None,
     }
     return result
 
@@ -3224,7 +3230,7 @@ async def refresh_live_jobs(authorization: str | None = Header(default=None)):
 def list_notifications(
     authorization: str | None = Header(default=None),
     category: str = Query(default="all", max_length=30),
-    status: str = Query(default="all", pattern="^(all|unread|read)$"),
+    status: str = Query(default="all", pattern="^(all|unread|read|applied)$"),
     search: str = Query(default="", max_length=120),
     sort: str = Query(default="newest", pattern="^(newest|oldest)$"),
     offset: int = Query(default=0, ge=0, le=100000),
@@ -3240,9 +3246,14 @@ def list_notifications(
             ensure_user(uid, connection)
         clauses, params = ["n.uid = ?"], [uid]
         if category != "all":
-            clauses.append("n.category = ?")
+            if category == "application":
+                clauses.append("(n.category = ? OR EXISTS (SELECT 1 FROM job_applications ja WHERE ja.uid = n.uid AND ja.notification_id = n.id))")
+            else:
+                clauses.append("n.category = ?")
             params.append(category)
-        if status != "all":
+        if status == "applied":
+            clauses.append("EXISTS (SELECT 1 FROM job_applications ja WHERE ja.uid = n.uid AND ja.notification_id = n.id)")
+        elif status != "all":
             clauses.append("n.is_read = ?")
             params.append(1 if status == "read" else 0)
         if search.strip():
@@ -3255,19 +3266,91 @@ def list_notifications(
         counts = {row["category"]: row["count"] for row in connection.execute(
             "SELECT category, COUNT(*) AS count FROM notifications WHERE uid = ? GROUP BY category", (uid,)
         ).fetchall()}
+        notification_total = sum(counts.values())
+        applied_count = connection.execute("SELECT COUNT(*) FROM job_applications WHERE uid = ?", (uid,)).fetchone()[0]
+        application_updates = counts.get("application", 0) + applied_count
+        counts["application"] = application_updates
         direction = "ASC" if sort == "oldest" else "DESC"
         rows = connection.execute(
-            f"SELECT n.*, j.source, j.external_job_id, j.company_logo, j.location, j.salary_min, j.salary_max, j.salary_currency, j.salary_period, j.salary_label, j.duration, j.listing_source, j.employment_type, j.work_mode, j.experience, j.qualification, j.job_url, j.posted_at, j.application_deadline, j.description, j.required_skills_json, j.matching_skills_json, j.missing_skills_json, j.match_explanation, j.last_seen_at FROM notifications n LEFT JOIN notification_job_details j ON j.notification_id=n.id WHERE {where} ORDER BY n.created_at {direction}, n.id {direction} LIMIT ? OFFSET ?",
+            f"SELECT n.*, j.source, j.external_job_id, j.company_logo, j.location, j.salary_min, j.salary_max, j.salary_currency, j.salary_period, j.salary_label, j.duration, j.listing_source, j.employment_type, j.work_mode, j.experience, j.qualification, j.job_url, j.posted_at, j.application_deadline, j.description, j.required_skills_json, j.matching_skills_json, j.missing_skills_json, j.match_explanation, j.last_seen_at, ja.status AS application_status, ja.updated_at AS application_updated_at FROM notifications n LEFT JOIN notification_job_details j ON j.notification_id=n.id LEFT JOIN job_applications ja ON ja.notification_id=n.id AND ja.uid=n.uid WHERE {where} ORDER BY CASE WHEN ja.updated_at IS NOT NULL THEN ja.updated_at ELSE n.created_at END {direction}, n.id {direction} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
         return {
             "notifications": [notification_record(row) for row in rows], "total": total,
             "unread": unread, "displayed": min(offset + len(rows), total), "offset": offset,
             "limit": limit, "has_more": offset + len(rows) < total,
-            "stats": {"total": sum(counts.values()), "unread": unread,
-                      "job_alerts": counts.get("job_match", 0), "application_updates": counts.get("application", 0)},
+            "stats": {"total": notification_total, "unread": unread,
+                      "job_alerts": counts.get("job_match", 0), "application_updates": application_updates,
+                      "applied_jobs": applied_count},
             "category_counts": counts,
         }
+    finally:
+        connection.close()
+
+
+@app.post("/notifications/{notification_id}/apply")
+def apply_to_job_notification(notification_id: str, authorization: str | None = Header(default=None)):
+    uid = authenticated_uid(authorization)
+    connection = get_database()
+    try:
+        notice = connection.execute(
+            "SELECT n.id, n.title, j.job_url FROM notifications n JOIN notification_job_details j ON j.notification_id=n.id WHERE n.id=? AND n.uid=?",
+            (notification_id, uid),
+        ).fetchone()
+        if not notice:
+            raise HTTPException(status_code=404, detail="Job alert was not found.")
+        if not notice["job_url"]:
+            raise HTTPException(status_code=400, detail="This sample alert has no application link.")
+        now = datetime.now(timezone.utc).isoformat()
+        with connection:
+            ensure_user(uid, connection)
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO job_applications (uid, notification_id, status, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
+                (uid, notification_id, now, now),
+            )
+            application = connection.execute(
+                "SELECT status, updated_at FROM job_applications WHERE uid=? AND notification_id=?",
+                (uid, notification_id),
+            ).fetchone()
+        return {"applied": True, "created": bool(cursor.rowcount), "status": application["status"], "updated_at": application["updated_at"]}
+    finally:
+        connection.close()
+
+
+@app.patch("/notifications/{notification_id}/application")
+async def update_job_application_status(
+    notification_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    uid = authenticated_uid(authorization)
+    payload = await request.json()
+    if not isinstance(payload, dict) or set(payload) != {"status"} or not isinstance(payload["status"], int) or isinstance(payload["status"], bool) or not 0 <= payload["status"] <= 3:
+        raise HTTPException(status_code=400, detail="Status must be a step from 0 to 3.")
+    connection = get_database()
+    try:
+        with connection:
+            application = connection.execute(
+                "SELECT status FROM job_applications WHERE uid=? AND notification_id=?",
+                (uid, notification_id),
+            ).fetchone()
+            if not application:
+                raise HTTPException(status_code=404, detail="Applied job was not found.")
+            current = application["status"]
+            requested = payload["status"]
+            if requested == current:
+                updated = False
+            elif requested != current + 1:
+                raise HTTPException(status_code=409, detail="Move application status forward one step at a time.")
+            else:
+                now = datetime.now(timezone.utc).isoformat()
+                connection.execute(
+                    "UPDATE job_applications SET status=?, updated_at=? WHERE uid=? AND notification_id=?",
+                    (requested, now, uid, notification_id),
+                )
+                current = requested
+                updated = True
+        return {"status": current, "updated": updated}
     finally:
         connection.close()
 

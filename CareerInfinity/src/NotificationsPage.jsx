@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { api, jsonRequest } from "./api";
+import ApplicationProgress from "./ApplicationProgress";
 import marketData from "../market_data.json";
 
 const PACKAGE_ROLE_MATCHERS = [
@@ -26,6 +27,7 @@ const TABS = [
   { label: "All", value: "all", status: "all" },
   { label: "New", value: "new", status: "unread" },
   { label: "Best match", value: "best", status: "all" },
+  { label: "Applications", value: "applications", status: "all" },
 ];
 const DEFAULT_PREFERENCES = {
   job_matches: true, internships: true, application_updates: true,
@@ -68,7 +70,7 @@ export default function NotificationsPage({ notify, setNotificationCount }) {
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({
-      category: activeTab.value === "best" ? "job_match" : "all",
+      category: activeTab.value === "best" ? "job_match" : activeTab.value === "applications" ? "application" : "all",
       status: activeTab.status,
       search: debouncedQuery,
       sort,
@@ -112,9 +114,9 @@ export default function NotificationsPage({ notify, setNotificationCount }) {
     try {
       const data = await api("/notifications/sample-jobs/seed", { method: "POST" });
       await fetchPage({ reset: true, silent: true });
-      if (!silent) notify(data.created ? `${data.created} sample job alerts added.` : `${data.total} sample job alerts are already loaded.`);
+      if (!silent) notify(data.created ? `${data.created} sample job notifications added.` : `${data.total} sample job notifications are already loaded.`);
     } catch (failure) {
-      setJobError(failure.message || "Unable to load sample job alerts.");
+      setJobError(failure.message || "Unable to load sample job notifications.");
     } finally { setJobLoading(false); }
   }, [fetchPage, notify]);
 
@@ -225,15 +227,34 @@ export default function NotificationsPage({ notify, setNotificationCount }) {
     } catch (failure) { notify(`Unable to mark notifications as read: ${failure.message}`); }
   };
 
+  const applyToJob = async item => {
+    try {
+      await api(`/notifications/${encodeURIComponent(item.id)}/apply`, { method: "POST" });
+      await markRead(item);
+      await fetchPage({ reset: true, silent: true });
+      notify("Application saved. You can track its status in Applications.");
+    } catch (failure) { notify(`Unable to save this application: ${failure.message}`); }
+  };
+
+  const updateApplicationStatus = async item => {
+    try {
+      await api(`/notifications/${encodeURIComponent(item.id)}/application`, jsonRequest("PATCH", { status: item.application_status + 1 }));
+      await fetchPage({ reset: true, silent: true });
+      notify("Application status updated.");
+    } catch (failure) { notify(`Unable to update application status: ${failure.message}`); }
+  };
+
   const unreadCount = result?.unread || 0;
   const visibleRecords = records
-    .filter(item => item.job)
+    .filter(item => activeTab.value === "applications"
+      ? item.category === "application" || item.is_applied
+      : item.job)
     .sort((a, b) => activeTab.value === "best"
       ? (b.match_percentage ?? -1) - (a.match_percentage ?? -1)
       : (new Date(a.created_at).getTime() - new Date(b.created_at).getTime()) * (sort === "oldest" ? 1 : -1));
   return <main className="job-alerts-page">
     <header className="job-alerts-header">
-      <div className="flex flex-wrap items-center gap-3"><h2>Job alerts</h2><span className="job-alerts-unread">{unreadCount} new</span></div>
+      <div className="flex flex-wrap items-center gap-3"><h2>Job notifications</h2><span className="job-alerts-unread">{unreadCount} new</span></div>
       <div className="job-alerts-actions">
         <button className="job-alerts-secondary" onClick={ensurePreferences}><Settings2 size={16}/>Notification settings</button>
         <button className="job-alerts-primary" onClick={markAllRead} disabled={!unreadCount}><CheckCheck size={16}/>Mark all as read</button>
@@ -265,33 +286,40 @@ export default function NotificationsPage({ notify, setNotificationCount }) {
     </section>
 
     <div className="job-alerts-tools">
-      <label className="job-alerts-search"><Search size={16}/><span className="sr-only">Search job alerts</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search jobs"/></label>
+      <label className="job-alerts-search"><Search size={16}/><span className="sr-only">Search job notifications</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search notifications"/></label>
       <label className="job-alerts-sort"><span>Sort</span><select value={sort} onChange={event => setSort(event.target.value)}><option value="newest">Newest</option><option value="oldest">Oldest</option></select></label>
     </div>
 
-    <div className="job-alerts-tabs" role="tablist" aria-label="Job alert filters">
-      {TABS.map(tab => <button key={tab.value} role="tab" aria-selected={activeTab.value === tab.value} onClick={() => setActiveTab(tab)}>{tab.label}{tab.value === "new" && unreadCount > 0 ? ` · ${unreadCount}` : ""}</button>)}
+    <div className="job-alerts-tabs" role="tablist" aria-label="Job notification filters">
+      {TABS.map(tab => <button key={tab.value} role="tab" aria-selected={activeTab.value === tab.value} onClick={() => setActiveTab(tab)}>{tab.label}{tab.value === "new" && unreadCount > 0 ? ` · ${unreadCount}` : tab.value === "applications" && result?.stats?.application_updates ? ` · ${result.stats.application_updates}` : ""}</button>)}
     </div>
 
     {error && <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-700" role="alert"><span>{error}</span><button onClick={() => fetchPage({ reset: true })} className="font-bold underline">Retry</button></div>}
-    {loading && !records.length ? <div className="job-alerts-skeleton" aria-label="Loading job alerts">{[0, 1, 2].map(index => <div key={index}/>)}</div> : visibleRecords.length ? <>
+    {loading && !records.length ? <div className="job-alerts-skeleton" aria-label="Loading job notifications">{[0, 1, 2].map(index => <div key={index}/>)}</div> : visibleRecords.length ? <>
       <div className="job-alert-list" aria-live="polite" aria-busy={loading || loadingMore}>
         {visibleRecords.map(item => {
           const job = item.job;
+          if (!job) return <article key={item.id} className="job-alert-card application-notice-card">
+            <h3>{item.title}</h3>
+            {item.company_name && <p className="job-alert-company">{item.company_name}</p>}
+            <p className="application-progress-message">{item.message}</p>
+          </article>;
           const rawPay = formatPackage(job, item.title).replace(/^Package:\s*/i, "").replace(/\(project estimate\)/i, "(estimate)");
           const highMatch = Number(item.match_percentage) >= Math.max(75, Number(preferences.minimum_match_percentage) || 0);
+          const deadlineState = getDeadlineState(job.application_deadline);
           return <article key={item.id} className="job-alert-card">
+            {deadlineState && <span className={`job-deadline-status is-${deadlineState.state}`}>{deadlineState.label}</span>}
             {highMatch && <span className="job-match-pill">Good match for you</span>}
             <h3>{item.title}</h3>
             <p className="job-alert-company">{item.company_name || "Company not disclosed"}{job.location ? ` · ${job.location}` : ""}</p>
             <p className="job-alert-pay">{rawPay}</p>
-            {job.job_url ? <a className="job-apply" href={job.job_url} target="_blank" rel="noreferrer" onClick={() => markRead(item)}>Apply</a> : <button className="job-apply" disabled>Apply unavailable</button>}
+            {item.is_applied ? <ApplicationProgress status={item.application_status} onUpdate={() => updateApplicationStatus(item)}/> : job.job_url ? <a className="job-apply" href={job.job_url} target="_blank" rel="noreferrer" onClick={() => applyToJob(item)}>Apply</a> : <button className="job-apply" disabled>Apply unavailable</button>}
           </article>;
         })}
       </div>
       <p className="job-alert-hint">Tap Apply to open the job page</p>
       {result?.has_more && <button onClick={() => fetchPage()} disabled={loadingMore} className="job-alert-load-more">{loadingMore && <LoaderCircle size={14} className="animate-spin"/>}Load 10 more</button>}
-    </> : !error && <div className="job-alert-empty">{query || activeTab.value !== "all" ? "No matching job alerts. Try another search or tab." : "No job alerts yet. New opportunities will appear here."}</div>}
+    </> : !error && <div className="job-alert-empty">{query || activeTab.value !== "all" ? "No matching job notifications. Try another search or tab." : "No job notifications yet. New opportunities will appear here."}</div>}
   </main>;
 }
 
@@ -308,5 +336,28 @@ function formatPackage(job, title) {
   const role = marketData.roles.find(entry => entry.title === roleName);
   const range = role?.salary_lpa?.replace(/\s*\(sample\)\s*$/i, "");
   return range ? `Package: ${range} (project estimate)` : "Package: Estimate unavailable";
+}
+
+function getDeadlineState(value) {
+  if (!value || typeof value !== "string") return null;
+  const raw = value.trim();
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const deadline = new Date(dateOnly ? `${raw}T23:59:59` : raw);
+  if (Number.isNaN(deadline.getTime())) return null;
+  const remaining = deadline.getTime() - Date.now();
+  const closed = remaining < 0;
+  const absolute = Math.abs(remaining);
+  const days = Math.floor(absolute / 86_400_000);
+  const hours = Math.floor((absolute % 86_400_000) / 3_600_000);
+  const minutes = Math.max(1, Math.ceil((absolute % 3_600_000) / 60_000));
+  const duration = days ? `${days}d${hours ? ` ${hours}h` : ""}` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+  const formattedDate = new Intl.DateTimeFormat("en-IN", dateOnly
+    ? { day: "numeric", month: "short", year: "numeric" }
+    : { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }
+  ).format(deadline);
+  return {
+    state: closed ? "closed" : "active",
+    label: closed ? `Deadline passed · ${formattedDate} · ${duration} ago` : `Deadline · ${formattedDate} · ${duration} left`,
+  };
 }
 

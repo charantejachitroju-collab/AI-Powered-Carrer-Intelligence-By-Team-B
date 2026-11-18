@@ -2,11 +2,11 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
 import {
-  Activity, ArrowDownToLine, ArrowRight, Award, BarChart3, Bell, BriefcaseBusiness, Camera, Link2, Mic,
-  CalendarDays, Check, ChevronLeft, CircleHelp,
+  Activity, ArrowRight, Award, BarChart3, Bell, BriefcaseBusiness, Camera, Link2, Mic,
+  CalendarDays, Check, ChevronLeft,
   CloudUpload, FileText, GraduationCap, LayoutDashboard, Lightbulb, LoaderCircle,
-  LogOut, Menu, MessageSquareText, Moon, MoreHorizontal, Plus, Search, Settings,
-  Sparkles, Target, Trash2, TrendingUp, Trophy, Upload, UserRound, Users, X,
+  LogOut, Menu, MessageSquareText, Moon, MoreHorizontal, Search, Settings,
+  Sparkles, Target, TrendingUp, Trophy, Upload, UserRound, Users, X,
 } from "lucide-react";
 import { getApps, initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signOut } from "firebase/auth";
@@ -32,38 +32,21 @@ const firebaseApp = getApps().length ? getApps()[0] : initializeApp(firebaseConf
 const auth = getAuth(firebaseApp);
 setTokenProvider(async forceRefresh => auth.currentUser ? auth.currentUser.getIdToken(forceRefresh) : "");
 
-const navigationSections = [
-  {
-    label: "Overview",
-    items: [
-      { path: "/home", label: "Dashboard", icon: LayoutDashboard },
-      { path: "/career", label: "Career intelligence", icon: TrendingUp },
-      { path: "/applications", label: "Applications", icon: BriefcaseBusiness },
-      { path: "/profile", label: "Profile", icon: UserRound },
-      { path: "/help", label: "Help & support", icon: CircleHelp },
-      { path: "/settings", label: "Settings", icon: Settings },
-      { path: "/notifications", label: "Notifications", icon: Bell },
-    ],
-  },
-  {
-    label: "Build skills",
-    items: [
-      { path: "/roadmap", label: "Learning path & roadmap", icon: GraduationCap },
-      { path: "/certificates", label: "Certificates", icon: Award },
-    ],
-  },
-  {
-    label: "Get hired",
-    items: [
-      { path: "/resume", label: "Resume analyser", icon: FileText },
-      { path: "/interview", label: "Mock interview", icon: MessageSquareText },
-      { path: "/recommendations", label: "Job recommendations", icon: Sparkles },
-      { path: "/jobs", label: "Job analyser", icon: BriefcaseBusiness },
-      { path: "/drives", label: "Placement drives", icon: CalendarDays },
-      { path: "/documents", label: "Documents", icon: FileText },
-    ],
-  },
-];
+const navigationSections = [{
+  label: "Workspace",
+  items: [
+    { path: "/home", label: "Dashboard", icon: LayoutDashboard },
+    { path: "/profile", label: "My Profile", icon: UserRound },
+    { path: "/career", label: "Career Recommendations", icon: TrendingUp },
+    { path: "/recommendations", label: "Job Recommendations", icon: Sparkles },
+    { path: "/roadmap", label: "Learning Path", icon: GraduationCap },
+    { path: "/resume", label: "Resume Analyzer", icon: FileText },
+    { path: "/interview", label: "Interview Preparation", icon: MessageSquareText },
+    { path: "/certificates", label: "Certifications", icon: Award },
+    { path: "/notifications", label: "Notifications", icon: Bell },
+    { path: "/settings", label: "Settings", icon: Settings },
+  ],
+}];
 const navigation = navigationSections.flatMap(section => section.items);
 
 const AppContext = createContext(null);
@@ -163,21 +146,16 @@ function App() {
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/resume" replace />} />
           <Route path="home" element={<DashboardPage />} />
-          <Route path="applications" element={<ApplicationsPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="career" element={<CareerIntelligencePage />} />
           <Route path="roadmap" element={<RoadmapPage />} />
           <Route path="skills" element={<Navigate to="/roadmap" replace />} />
           <Route path="resume" element={<ResumeAnalyzerPage />} />
-          <Route path="jobs" element={<JobAnalyzerPage />} />
           <Route path="interview" element={<MockInterviewPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
-          <Route path="drives" element={<PlacementDrivesPage />} />
-          <Route path="documents" element={<DocumentsPage />} />
           <Route path="certificates" element={<CertificatesPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="notifications" element={<NotificationsPage notify={notify} setNotificationCount={setNotificationCount}/>} />
-          <Route path="help" element={<HelpPage />} />
           <Route path="*" element={<Navigate to="/resume" replace />} />
         </Route>
       </Routes>
@@ -198,7 +176,7 @@ function AppLayout() {
   const [globalSearch, setGlobalSearch] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
-  const current = navigation.find(item => location.pathname.startsWith(item.path)) || navigation[3];
+  const current = navigation.find(item => location.pathname.startsWith(item.path)) || navigation[0];
   const initials = (user.displayName || user.email || "C").slice(0, 1).toUpperCase();
   const resolvedTheme = theme === "system"
     ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
@@ -318,6 +296,10 @@ function SkillChip({ children, tone = "neutral" }) {
   return <span className={`skill-chip skill-chip-${tone}`}>{children}</span>;
 }
 
+function normalizeRoleTitle(title) {
+  return String(title || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function JourneyStep({ icon: Icon, label, status, last = false }) {
   return <div className={`journey-step journey-step-${status}${last ? " journey-step-last" : ""}`}>
     <span className="journey-step-marker" aria-hidden="true">{status === "done" ? <Check size={16}/> : <Icon size={16}/>}</span>
@@ -338,14 +320,15 @@ function DashboardPage() {
   const hasResume = Boolean(summary?.document || analysis);
   const hasReviewedSkills = hasResume && skills.length > 0;
   const hasPractisedInterview = summary?.recent_activity?.some(item => item.title.startsWith("Mock interview")) || false;
-  const completed = [hasResume, hasReviewedSkills, roadmapPercent === 100, hasPractisedInterview, false];
+  const hasAppliedToJob = Number(notificationSummary?.stats?.applied_jobs) > 0;
+  const completed = [hasResume, hasReviewedSkills, roadmapPercent === 100, hasPractisedInterview, hasAppliedToJob];
   const currentStepIndex = completed.findIndex(done => !done);
   const stepActions = [
     { to: "/resume", label: "Upload and analyse", title: "Start with your resume", copy: "Upload a resume to discover your strongest skills and career matches." },
     { to: "/career", label: "Review your skills", title: "Review your skill signals", copy: "See which strengths and gaps shape your best-fit career matches." },
     { to: "/roadmap", label: "Resume learning", title: "Build skills for your target role", copy: "Pick up your learning path and track progress as you complete resources." },
     { to: "/interview", label: "Practise an interview", title: "Practise before your next interview", copy: "Run through a role-based mock interview and review your feedback." },
-    { to: "/drives", label: "Explore placement drives", title: "Find your next opportunity", copy: "Review current openings, check eligibility, and save drives that fit." },
+    { to: "/recommendations", label: "Explore job recommendations", title: "Find your next opportunity", copy: "Explore roles and projects that fit your strengths and career goals." },
   ];
   const currentStep = stepActions[Math.max(0, currentStepIndex)];
   const bestMatch = roleMatches[0];
@@ -408,46 +391,13 @@ function DashboardPage() {
       <Card><div className="mb-4 flex items-center justify-between"><div><h3 className="font-bold">Quick actions</h3><p className="mt-1 text-xs text-slate-500">Pick up where you left off</p></div><Sparkles className="text-violet-500" size={20}/></div><div className="grid gap-3 sm:grid-cols-3">
         <Link to="/resume" className="glass-tile group rounded-2xl bg-violet-50 p-4 transition"><FileText className="mb-5 text-violet-600" size={19}/><strong className="block text-sm">Resume analyser</strong><span className="mt-1 block text-xs text-slate-500">Find skill signals and role matches</span></Link>
         <Link to="/interview" className="glass-tile group rounded-2xl bg-blue-50 p-4 transition"><MessageSquareText className="mb-5 text-blue-600" size={19}/><strong className="block text-sm">Practise interviews</strong><span className="mt-1 block text-xs text-slate-500">Get feedback on role-based answers</span></Link>
-        <Link to="/drives" className="glass-tile group rounded-2xl bg-emerald-50 p-4 transition"><CalendarDays className="mb-5 text-emerald-600" size={19}/><strong className="block text-sm">Find opportunities</strong><span className="mt-1 block text-xs text-slate-500">Explore placement drives</span></Link>
+        <Link to="/recommendations" className="glass-tile group rounded-2xl bg-emerald-50 p-4 transition"><Sparkles className="mb-5 text-emerald-600" size={19}/><strong className="block text-sm">Explore careers</strong><span className="mt-1 block text-xs text-slate-500">See role and project ideas</span></Link>
       </div></Card>
       <Card><h3 className="font-bold">Recent activity</h3><p className="mb-4 mt-1 text-xs text-slate-500">Your latest CareerInfinity actions</p>{summary?.recent_activity?.length ? <div className="space-y-4">{summary.recent_activity.map((item, index) => <div key={`${item.title}-${index}`} className="flex gap-3"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-violet-50 text-violet-600"><Activity size={15}/></span><div><strong className="block text-xs text-slate-700">{item.title}</strong><span className="text-[10px] text-slate-500">{new Date(item.date).toLocaleString()}</span></div></div>)}</div> : <EmptyState icon={Activity} title="Your activity will appear here" description="Analyse your resume or start a mock interview to get going."/ >}</Card>
     </div>
   </>;
 }
 
-function ApplicationsPage() {
-  const { data, loading, error, reload } = useResource(() => api("/notifications?category=application&status=all&sort=newest&limit=50"));
-  const { notify } = useApp();
-  const updates = data?.notifications || [];
-  const markRead = async item => {
-    if (item.is_read) return;
-    try { await api(`/notifications/${encodeURIComponent(item.id)}/read`, { method: "PATCH" }); await reload(); }
-    catch (failure) { notify(`Unable to update this alert: ${failure.message}`); }
-  };
-  return <>
-    <PageTitle title="Applications" subtitle="Follow application updates saved to your CareerInfinity notifications." action={<Link to="/notifications" className="ui-button ui-button-secondary">Open notifications <ArrowRight size={16}/></Link>}/>
-    <div className="mb-5 grid gap-4 sm:grid-cols-2">
-      <StatCard label="Application updates" value={data?.total ?? "—"} note="Updates currently in your account" icon={BriefcaseBusiness} tone="blue"/>
-      <StatCard label="Unread updates" value={data?.unread ?? "—"} note="Updates to review" icon={Bell} tone="amber"/>
-    </div>
-    {loading && <Loading label="Loading application updates…"/>}
-    {error && <ErrorState message={error} onRetry={reload}/>}
-    {data && (updates.length ? <div className="application-updates" aria-live="polite">
-      {updates.map(item => <Card key={item.id} className="application-update-card">
-        <div className="flex min-w-0 items-start gap-3">
-          <span className="application-update-icon"><BriefcaseBusiness size={19}/></span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2"><h3>{item.title}</h3>{!item.is_read && <span className="status-chip status-chip-new">New update</span>}</div>
-            {item.company_name && <p className="application-company">{item.company_name}</p>}
-            <p className="application-message">{item.message}</p>
-            <time className="application-date" dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
-          </div>
-          <button type="button" className="ui-button ui-button-ghost application-read-button" disabled={item.is_read} onClick={() => markRead(item)}>{item.is_read ? "Read" : "Mark as read"}</button>
-        </div>
-      </Card>)}
-    </div> : <EmptyState icon={BriefcaseBusiness} title="No application updates yet" description="When an application update is added to your account, it will appear here. Job alerts and career updates are available in Notifications." action={<Link to="/notifications" className="ui-button ui-button-primary">View notifications</Link>}/>)}
-  </>;
-}
 
 function ProfilePage() {
   const { data, loading, error, reload } = useResource(async () => {
@@ -473,7 +423,7 @@ function ProfilePage() {
     finally { setSaving(false); }
   };
   return <>
-    <PageTitle title="Your profile" subtitle="Keep your details current so your career insights stay relevant." action={<Link to="/documents" className="ui-button ui-button-secondary"><FileText size={16}/>Resume documents</Link>}/>
+    <PageTitle title="Your profile" subtitle="Keep your details current so your career insights stay relevant." action={<Link to="/resume" className="ui-button ui-button-secondary"><FileText size={16}/>Resume Analyzer</Link>}/>
     {loading && !form && <Loading label="Loading your profile…"/>}
     {error && <ErrorState message={error} onRetry={reload}/>}
     {form && <>
@@ -805,43 +755,34 @@ function ResumeAnalyzerPage() {
   </>;
 }
 
-function JobAnalyzerPage() {
-  const { notify } = useApp();
-  const [description, setDescription] = useState("");
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const analyze = async event => {
-    event.preventDefault();
-    setLoading(true); setError(""); setResult(null);
-    try {
-      const data = await api("/jobs/analyze", jsonRequest("POST", { job_description: description }));
-      setResult(data); notify("Job description compared with your latest resume.");
-    } catch (failure) { setError(failure.message); }
-    finally { setLoading(false); }
-  };
-  return <>
-    <PageTitle title="Job analyser" subtitle="Compare a job description with your analysed resume and identify aligned skills and gaps."/>
-    <div className="grid gap-5 xl:grid-cols-2">
-      <Card><form onSubmit={analyze} className="space-y-4"><TextArea label="Paste job description" rows={14} required minLength={40} maxLength={15000} value={description} onChange={event => setDescription(event.target.value)} placeholder="Paste the responsibilities and requirements from the job post..."/>{error && <ErrorState message={error}/>}<Button disabled={loading || description.trim().length < 40}>{loading && <LoaderCircle className="animate-spin" size={16}/>}Compare job description</Button></form></Card>
-      <Card><h3 className="mb-4 font-bold">Your match report</h3>{loading ? <Loading label="Comparing skills..."/> : result ? <><ScoreGauge score={result.match_score} label="job match" estimated/><p className="text-center text-xs text-slate-500">Keyword-based estimate, not a hiring decision.</p><div className="mt-5 grid gap-4 sm:grid-cols-2"><div><h4 className="mb-2 text-xs font-bold text-emerald-700">Matched keywords</h4><div className="flex flex-wrap gap-2">{result.matched_skills?.map(skill => <SkillChip key={skill} tone="matched">{skill}</SkillChip>)}</div></div><div><h4 className="mb-2 text-xs font-bold text-rose-700">Skills to develop</h4><div className="flex flex-wrap gap-2">{result.missing_skills?.map(skill => <SkillChip key={skill} tone="missing">{skill}</SkillChip>)}</div></div></div><p className="mt-4 text-xs text-slate-500">{result.summary}</p></> : <EmptyState icon={BriefcaseBusiness} title="Ready when you are" description="Analyse a resume first, then paste a job description to compare your skill signals."/ >}</Card>
-    </div>
-  </>;
-}
 
 function MockInterviewPage() {
-  const { notify } = useApp();
+  const { notify, summary } = useApp();
   const [catalog,setCatalog]=useState([]); const [history,setHistory]=useState([]); const [role,setRole]=useState(""); const [search,setSearch]=useState(""); const [aiConfigured,setAIConfigured]=useState(null);
   const [experience,setExperience]=useState("Fresher"); const [difficulty,setDifficulty]=useState("Medium"); const [mode,setMode]=useState("Text Based"); const [count,setCount]=useState("5"); const [customCount,setCustomCount]=useState(5);
   const [session,setSession]=useState(null); const [round,setRound]=useState(0); const [questions,setQuestions]=useState([]); const [questionProvider,setQuestionProvider]=useState(""); const [index,setIndex]=useState(0); const [answer,setAnswer]=useState(""); const [evaluation,setEvaluation]=useState(null); const [report,setReport]=useState(null);
   const [loading,setLoading]=useState(false); const [error,setError]=useState(""); const [stream,setStream]=useState(null); const [recording,setRecording]=useState(false); const [cameraConsent,setCameraConsent]=useState(false); const videoRef=useRef(null); const recorder=useRef(null); const chunks=useRef([]); const speech=useRef(null);
   const rounds=["Aptitude & Initial Screening","Technical Interview","Practical Assessment","HR & Behavioral Interview"];
   useEffect(()=>{api("/mock-interviews/roles").then(x=>{setCatalog(x.roles);setAIConfigured(Boolean(x.ai_configured));}).catch(e=>setError(e.message));api("/mock-interviews/history").then(x=>setHistory(x.sessions)).catch(()=>{});},[]);
+  const recommendedRoles = summary?.role_matches?.roles || [];
+  const personalizedRoles = useMemo(() => recommendedRoles.map(recommendation => {
+    const title = recommendation.role || recommendation.title || "";
+    const interviewRole = catalog.find(item => normalizeRoleTitle(item.title) === normalizeRoleTitle(title));
+    return {
+      ...(interviewRole || {}),
+      title,
+      category: interviewRole?.category || "Resume match",
+      description: recommendation.why_this_role_fits || interviewRole?.description || `Recommended from your resume skills for a ${title} role.`,
+      skills: interviewRole?.skills || [],
+      match_score: recommendation.match_score,
+    };
+  }), [recommendedRoles, catalog]);
+  useEffect(()=>{if(personalizedRoles.length&&!personalizedRoles.some(item=>item.title===role))setRole(personalizedRoles[0].title);},[personalizedRoles,role]);
   useEffect(()=>{if(videoRef.current&&stream)videoRef.current.srcObject=stream;},[stream]);
   useEffect(()=>()=>{stream?.getTracks().forEach(t=>t.stop());},[stream]);
   const releaseMedia=()=>{stream?.getTracks().forEach(t=>t.stop());setStream(null);setRecording(false);};
-  const filtered=catalog.filter(x=>(!search||(`${x.title} ${x.category} ${x.skills.join(" ")}`).toLowerCase().includes(search.toLowerCase())));
-  const start=async()=>{setLoading(true);setError("");try{const s=await api("/mock-interviews/start",jsonRequest("POST",{role,experience,difficulty,mode,questions_per_round:count==="custom"?customCount:Number(count)}));setSession(s);setRound(1);setIndex(0);setEvaluation(null);setReport(null);await loadRound(s.id,1);}catch(e){setError(e.message);}finally{setLoading(false);}};
+  const filtered=personalizedRoles.filter(x=>(!search||(`${x.title} ${x.category} ${x.skills.join(" ")}`).toLowerCase().includes(search.toLowerCase())));
+  const start=async()=>{setLoading(true);setError("");try{const matchedCatalogRole=catalog.find(item=>normalizeRoleTitle(item.title)===normalizeRoleTitle(role));const s=await api("/mock-interviews/start",jsonRequest("POST",{role:matchedCatalogRole?.title||role,custom_role:!matchedCatalogRole,experience,difficulty,mode,questions_per_round:count==="custom"?customCount:Number(count)}));setSession(s);setRound(1);setIndex(0);setEvaluation(null);setReport(null);await loadRound(s.id,1);}catch(e){setError(e.message);}finally{setLoading(false);}};
   const loadRound=async(id,n)=>{setLoading(true);setError("");setQuestionProvider("");try{const data=await api(`/mock-interviews/${id}/round/${n}`,{method:"POST"});setQuestions(data.questions);setQuestionProvider(data.provider||"AI");setIndex(0);setEvaluation(null);setAnswer("");}catch(e){setError(e.message);}finally{setLoading(false);}};
   const nextRound=async()=>{if(round<4){const next=round+1;setRound(next);await loadRound(session.id,next);}};
   const submit=async e=>{e.preventDefault();if(!answer.trim())return;setLoading(true);setError("");try{const res=await api(`/mock-interviews/${session.id}/answer`,jsonRequest("POST",{round_number:round,question_index:index,answer}));setEvaluation(res.evaluation);if(res.report){setReport(res.report);releaseMedia();}notify("Answer evaluated and saved to your private interview history.");}catch(x){setError(x.message);}finally{setLoading(false);}};
@@ -851,8 +792,21 @@ function MockInterviewPage() {
   const startFresh=()=>{releaseMedia();setSession(null);setReport(null);setQuestions([]);setQuestionProvider("");setError("");api("/mock-interviews/history").then(x=>setHistory(x.sessions)).catch(()=>{});};
   return <>
     <PageTitle title="Mock interview" subtitle="Practise with role-based questions, review answer feedback, and track your private session history." action={session&&!report?<Button variant="secondary" onClick={startFresh}>Save & leave</Button>:null}/>
-    {!session&&<div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]"><Card><div className="mb-4 flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-xl bg-violet-50 text-violet-600"><MessageSquareText size={20}/></span><div><h3 className="font-bold">Choose your target role</h3><p className="text-xs text-slate-500">{catalog.length} roles across six career categories</p></div></div><input className="mb-4 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm" placeholder="Search roles, skills, or categories" value={search} onChange={e=>setSearch(e.target.value)}/><div className="max-h-72 space-y-2 overflow-auto">{filtered.map(item=><button key={item.title} type="button" aria-pressed={role===item.title} onClick={()=>setRole(item.title)} className={`w-full rounded-xl border p-3 text-left ${role===item.title?"border-violet-500 bg-violet-50":"border-slate-100 hover:border-violet-200"}`}><span className="flex items-center justify-between text-sm font-bold">{item.title}<span className="text-[10px] font-medium text-slate-400">{item.category}</span></span><span className="mt-1 block text-xs text-slate-500">{item.description}</span><span className="mt-2 flex flex-wrap gap-1">{item.skills.slice(0,5).map(skill=><span key={skill} className="rounded-full bg-slate-100 px-2 py-1 text-[10px] text-slate-600">{skill}</span>)}</span></button>)}</div></Card>
-      <Card><h3 className="font-bold">Interview configuration</h3><p className="mb-5 mt-1 text-xs text-slate-500">Questions are generated one round at a time using this context.</p>{aiConfigured===false&&<div role="status" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900"><strong>AI provider setup needed.</strong> Configure <code>LLM_API_KEY</code>, <code>LLM_API_URL</code>, and <code>LLM_MODEL</code> in the project’s local <code>.env</code> file, then restart the server. Keep the key out of the browser and source control.</div>}<div className="space-y-4"><SelectInput label="Experience level" value={experience} onChange={e=>setExperience(e.target.value)} options={["Fresher","Beginner","Intermediate","Experienced"].map(value=>({value,label:value}))}/><SelectInput label="Difficulty" value={difficulty} onChange={e=>setDifficulty(e.target.value)} options={["Easy","Medium","Hard","Adaptive"].map(value=>({value,label:value}))}/><SelectInput label="Interview mode" value={mode} onChange={e=>setMode(e.target.value)} options={["Camera + Microphone","Voice Only","Text Based"].map(value=>({value,label:value}))}/><label className="block text-xs font-semibold">Questions per round<select className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm" value={count} onChange={e=>setCount(e.target.value)}>{[5,10].map(v=><option key={v} value={String(v)}>{v}</option>)}<option value="custom">Custom</option></select></label>{count==="custom"&&<label className="block text-xs font-semibold">Custom count (1–20)<input aria-label="Custom questions per round" type="number" min="1" max="20" value={customCount} className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm" onChange={e=>setCustomCount(Math.max(1,Math.min(20,Number(e.target.value)||1)))}/></label>}<div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600"><strong>Selected:</strong> {role||"Choose a role"} · {experience} · {difficulty} · {count==="custom"?customCount:count} questions each across four rounds</div>{error&&<><ErrorState message={error}/>{error.toLowerCase().includes("sign in again")&&<button type="button" className="text-xs font-semibold text-violet-700 underline" onClick={async()=>{try{await signOut(auth);}finally{window.location.assign("/");}}}>Sign in again</button>}</>}<Button onClick={start} disabled={loading||!catalog.some(x=>x.title===role)}>{loading&&<LoaderCircle size={15} className="animate-spin"/>}Start interview</Button></div></Card></div>}
+    {!session&&<div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]"><Card>
+        <div className="mb-4 flex items-center gap-3">
+          <span className="grid h-11 w-11 place-items-center rounded-xl bg-violet-50 text-violet-600"><MessageSquareText size={20}/></span>
+          <div><h3 className="font-bold">Choose a role from your recommendations</h3><p className="text-xs text-slate-500">{personalizedRoles.length} resume-based role matches</p></div>
+        </div>
+        {personalizedRoles.length > 0 && <input className="mb-4 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm" placeholder="Search your recommended roles" value={search} onChange={event => setSearch(event.target.value)}/>}
+        <div className="max-h-72 space-y-2 overflow-auto">
+          {!summary ? <Loading label="Loading resume-based recommendations…"/> : !personalizedRoles.length ? <EmptyState title="No resume matches yet" description="Analyze your resume to get role recommendations for interview practice." action={<Link className="text-xs font-semibold text-violet-700" to="/resume">Open Resume Analyzer</Link>}/> : filtered.length ? filtered.map(item => <button key={item.title} type="button" aria-pressed={role === item.title} onClick={() => setRole(item.title)} className={`w-full rounded-xl border p-3 text-left ${role === item.title ? "border-violet-500 bg-violet-50" : "border-slate-100 hover:border-violet-200"}`}>
+            <span className="flex flex-wrap items-center justify-between gap-2 text-sm font-bold"><span>{item.title}</span><span className="flex items-center gap-2"><span className="text-[10px] font-medium text-slate-400">{item.category}</span>{item.match_score != null && <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">{Math.min(99, Number(item.match_score) || 0)}% resume match</span>}</span></span>
+            <span className="mt-1 block text-xs text-slate-500">{item.description}</span>
+            {item.skills.length > 0 && <span className="mt-2 flex flex-wrap gap-1">{item.skills.slice(0, 5).map(skill => <span key={skill} className="rounded-full bg-slate-100 px-2 py-1 text-[10px] text-slate-600">{skill}</span>)}</span>}
+          </button>) : <EmptyState title="No matching roles" description="Try a shorter search or clear your search to see your resume-based matches."/>}
+        </div>
+      </Card>
+      <Card><h3 className="font-bold">Interview configuration</h3><p className="mb-5 mt-1 text-xs text-slate-500">Questions are generated one round at a time using this context.</p>{aiConfigured===false&&<div role="status" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900"><strong>AI provider setup needed.</strong> Configure <code>LLM_API_KEY</code>, <code>LLM_API_URL</code>, and <code>LLM_MODEL</code> in the project’s local <code>.env</code> file, then restart the server. Keep the key out of the browser and source control.</div>}<div className="space-y-4"><SelectInput label="Experience level" value={experience} onChange={e=>setExperience(e.target.value)} options={["Fresher","Beginner","Intermediate","Experienced"].map(value=>({value,label:value}))}/><SelectInput label="Difficulty" value={difficulty} onChange={e=>setDifficulty(e.target.value)} options={["Easy","Medium","Hard","Adaptive"].map(value=>({value,label:value}))}/><SelectInput label="Interview mode" value={mode} onChange={e=>setMode(e.target.value)} options={["Camera + Microphone","Voice Only","Text Based"].map(value=>({value,label:value}))}/><label className="block text-xs font-semibold">Questions per round<select className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm" value={count} onChange={e=>setCount(e.target.value)}>{[5,10].map(v=><option key={v} value={String(v)}>{v}</option>)}<option value="custom">Custom</option></select></label>{count==="custom"&&<label className="block text-xs font-semibold">Custom count (1–20)<input aria-label="Custom questions per round" type="number" min="1" max="20" value={customCount} className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm" onChange={e=>setCustomCount(Math.max(1,Math.min(20,Number(e.target.value)||1)))}/></label>}<div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600"><strong>Selected:</strong> {role||"Choose a role"} · {experience} · {difficulty} · {count==="custom"?customCount:count} questions each across four rounds</div>{error&&<><ErrorState message={error}/>{error.toLowerCase().includes("sign in again")&&<button type="button" className="text-xs font-semibold text-violet-700 underline" onClick={async()=>{try{await signOut(auth);}finally{window.location.assign("/");}}}>Sign in again</button>}</>}<Button onClick={start} disabled={loading||!personalizedRoles.some(x=>x.title===role)}>{loading&&<LoaderCircle size={15} className="animate-spin"/>}Start interview</Button></div></Card></div>}
     {session&&!report&&<><div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{rounds.map((name,i)=><div key={name} className={`rounded-2xl border p-4 ${round===i+1?"border-violet-400 bg-violet-50":"border-slate-200 bg-white"}`}><span className="text-[10px] font-bold uppercase text-violet-600">Round {i+1}</span><h3 className="mt-1 text-sm font-bold">{name}</h3><p className="mt-2 text-[11px] text-slate-500">{i+1<round?"Completed":i+1===round?`Question ${Math.min(index+1,questions.length)} of ${questions.length}`:"Not started"}</p></div>)}</div><div className="grid gap-5 xl:grid-cols-[1.2fr_.8fr]"><Card>{questionProvider==="Sample questions (AI offline)"&&<div role="status" className="interview-offline-notice mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900"><strong>Sample questions (AI offline).</strong>{" "}<span>These are examples, not AI-generated. Check your API key and quota, then retry for role-specific questions.</span></div>}{loading&&!questions.length?<Loading label="Generating this round's questions with AI..."/>:error&&!questions.length?<ErrorState message={error} onRetry={()=>loadRound(session.id,round)}/>:questions[index]&&<><div className="mb-4 flex items-center justify-between"><span className="rounded-full bg-violet-50 px-3 py-1 text-[11px] font-bold text-violet-700">{rounds[round-1]} · {index+1}/{questions.length}</span><span className="text-xs text-slate-400">{questions[index].difficulty} · {questions[index].time_limit_seconds/60} min</span></div><div className="rounded-2xl bg-slate-50 p-5"><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600">{questions[index].category}</p><p className="mt-2 text-base font-semibold leading-7 text-slate-800">{questions[index].text}</p></div><form onSubmit={submit} className="mt-4 space-y-3">{questions[index].question_type==="code"&&<SelectInput label="Language" options={["Python","JavaScript","Java","C++","SQL"].map(v=>({value:v,label:v}))}/>}<TextArea label={questions[index].question_type==="code"?"Your solution":"Your answer"} rows={questions[index].question_type==="code"?9:6} maxLength={12000} required value={answer} onChange={e=>setAnswer(e.target.value)} placeholder="Explain your thinking and include relevant details..."/>{error&&<ErrorState message={error}/>} {!evaluation?<Button disabled={loading||!answer.trim()}>{loading&&<LoaderCircle size={15} className="animate-spin"/>}Submit answer</Button>:<Button type="button" onClick={advance}>{index+1<questions.length?"Next question":round<4?"Continue to next round":"View final report"}<ArrowRight size={15}/></Button>}</form>{evaluation&&<div className="mt-4 rounded-xl bg-emerald-50 p-4 text-emerald-900"><strong className="text-sm">AI feedback · {evaluation.score}/100</strong><p className="mt-2 text-xs">{evaluation.feedback}</p><p className="mt-3 text-xs"><b>Covered:</b> {evaluation.correct_points.join(" · ")||"Review the feedback above."}</p><p className="mt-2 text-xs"><b>Explore further:</b> {evaluation.missing_concepts.join(" · ")||"Keep building on this answer."}</p><p className="mt-2 text-xs"><b>Improve:</b> {evaluation.improvement}</p><details className="mt-2 text-xs"><summary className="cursor-pointer font-semibold">Suggested answer approach</summary><p className="mt-2">{evaluation.suggested_answer}</p></details></div>}</>}</Card>
       <div className="space-y-5"><Card><div className="flex items-center justify-between"><h3 className="font-bold">Practice setup</h3>{stream&&<button type="button" className="text-xs text-rose-600" onClick={releaseMedia}>Stop devices</button>}</div>{mode!=="Text Based"&&<div className="mt-3">{mode==="Camera + Microphone"&&<label className="mb-3 flex items-center gap-2 text-xs"><input type="checkbox" checked={cameraConsent} onChange={e=>setCameraConsent(e.target.checked)}/>I consent to using my camera and microphone for this practice session. Video is not saved.</label>}<div className="overflow-hidden rounded-xl bg-slate-900">{mode==="Camera + Microphone"?<video ref={videoRef} autoPlay muted playsInline className="aspect-video w-full object-cover"/>:<div className="grid aspect-video place-items-center text-white"><Mic size={28}/><span className="text-xs">Voice-only mode</span></div>}</div><div className="mt-3 flex gap-2"><Button variant="secondary" onClick={enableMedia}><Camera size={15}/>{stream?"Reconnect devices":"Enable devices"}</Button>{stream&&<Button variant="secondary" onClick={record}><Mic size={15}/>{recording?"Stop recording":"Record answer"}</Button>}</div><p className="mt-2 text-[10px] text-slate-500">Speech recognition runs in your browser when supported. Audio and video recordings are not saved.</p></div>}<p className="mt-4 text-xs text-slate-500">{session.role} · {session.experience} · {session.difficulty} · {session.mode}</p></Card><Card><h3 className="font-bold">Question progress</h3><div className="mt-4 space-y-3">{rounds.map((x,i)=><div key={x}><div className="mb-1 flex justify-between text-[11px]"><span>{x}</span><span>{i+1<round?"Complete":i+1===round?`${index}/${questions.length}`:"—"}</span></div><div className="h-2 rounded-full bg-slate-100"><div className="h-2 rounded-full bg-violet-500" style={{width:`${i+1<round?100:i+1===round?Math.round(index/questions.length*100):0}%`}}/></div></div>)}</div></Card></div></div></>}
     {report&&<div className="grid gap-5 xl:grid-cols-[.9fr_1.1fr]"><Card><h3 className="text-lg font-bold">Interview performance report</h3><p className="mt-1 text-sm text-slate-500">{report.role} · four rounds completed</p><div className="mt-5 rounded-2xl bg-violet-50 p-5"><strong className="text-4xl font-extrabold text-violet-700">{report.overall_score}<small className="text-base">/100</small></strong><p className="mt-2 text-xs text-slate-600">{report.total_questions} answers · {report.correct_answers} scored 70 or higher</p><p className="mt-2 text-[10px] text-slate-500">{report.weighting}</p></div><h4 className="mt-5 text-sm font-bold">Round scores</h4>{rounds.map((name,i)=><div key={name} className="mt-3"><div className="mb-1 flex justify-between text-xs"><span>{name}</span><b>{report.round_scores[String(i+1)]}/100</b></div><div className="h-2 rounded-full bg-slate-100"><div className="h-2 rounded-full bg-violet-500" style={{width:`${report.round_scores[String(i+1)]}%`}}/></div></div>)}<Button className="mt-5" onClick={startFresh}>Retry interview</Button></Card><Card><h3 className="font-bold">Your feedback</h3><h4 className="mt-4 text-xs font-bold text-emerald-700">Strengths</h4><ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">{report.strengths.length?report.strengths.map(x=><li key={x}>{x}</li>):<li>Review your question feedback to identify strengths.</li>}</ul><h4 className="mt-4 text-xs font-bold text-amber-700">Topics to improve</h4><ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">{report.improvement_areas.length?report.improvement_areas.map(x=><li key={x}>{x}</li>):<li>Continue practicing clear, complete explanations.</li>}</ul><details className="mt-5"><summary className="cursor-pointer text-sm font-bold">Question-wise feedback</summary><div className="mt-3 max-h-96 space-y-3 overflow-auto">{report.answers.map((item,i)=><div key={item.question.id} className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-semibold">{i+1}. {item.question.text}</p><p className="mt-1 text-[11px] text-violet-700">Score {item.evaluation.score}/100 · {item.evaluation.feedback}</p></div>)}</div></details></Card></div>}
@@ -877,71 +831,7 @@ function RecommendationsPage() {
   </>;
 }
 
-function PlacementDrivesPage() {
-  const { notify } = useApp();
-  const [filter, setFilter] = useState("All");
-  const [sort, setSort] = useState("date");
-  const { data, loading, error, reload } = useResource(() => api(`/drives?type=${encodeURIComponent(filter)}&sort=${sort}`), [filter, sort]);
-  const [adminToken, setAdminToken] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [newDrive, setNewDrive] = useState({ company:"", role:"", eligibility:"", package_lpa:"", date:"", mode:"Virtual", type:"Off Campus", apply_url:"", required_skills:"" });
-  const [adminError, setAdminError] = useState("");
-  const apply = async drive => {
-    try { await api(`/drives/${drive.id}/apply`, { method:"POST" }); notify(`Application interest saved for ${drive.company}.`); reload(); }
-    catch (failure) { setAdminError(failure.message); }
-  };
-  const addDrive = async event => {
-    event.preventDefault(); setAdminError("");
-    try {
-      await api("/drives", { ...jsonRequest("POST", { ...newDrive, required_skills:newDrive.required_skills.split(",").map(skill => skill.trim()).filter(Boolean) }), headers:{ "X-Admin-Token":adminToken } });
-      notify("Placement drive added."); setNewDrive({ company:"", role:"", eligibility:"", package_lpa:"", date:"", mode:"Virtual", type:"Off Campus", apply_url:"", required_skills:"" }); reload();
-    } catch (failure) { setAdminError(failure.message); }
-  };
-  const filters = ["All","On Campus","Off Campus","Virtual"];
-  return <>
-    <PageTitle title="Placement drives" subtitle="Review eligibility, compare opportunities, and save drives you want to explore." action={<Button variant="secondary" onClick={() => setShowAdmin(value => !value)}><Plus size={15}/>Admin tools</Button>}/>
-    <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-2">{filters.map(item => <button key={item} onClick={() => setFilter(item)} className={`rounded-full px-4 py-2 text-xs font-semibold ${filter === item ? "bg-violet-600 text-white" : "border border-slate-200 bg-white text-slate-600"}`}>{item}</button>)}</div><SelectInput label="Sort by" value={sort} onChange={event => setSort(event.target.value)} options={[{value:"date",label:"Date"},{value:"match",label:"Best match"}]}/></div>
-    {showAdmin && <Card className="mb-5"><h3 className="mb-4 font-bold">Add a drive (administrator)</h3><form onSubmit={addDrive} className="grid gap-3 md:grid-cols-3"><TextInput label="Admin token" type="password" value={adminToken} onChange={event => setAdminToken(event.target.value)}/><TextInput label="Company" required value={newDrive.company} onChange={event => setNewDrive({...newDrive,company:event.target.value})}/><TextInput label="Role" required value={newDrive.role} onChange={event => setNewDrive({...newDrive,role:event.target.value})}/><TextInput label="Eligibility" value={newDrive.eligibility} onChange={event => setNewDrive({...newDrive,eligibility:event.target.value})}/><TextInput label="Package (₹ LPA)" value={newDrive.package_lpa} onChange={event => setNewDrive({...newDrive,package_lpa:event.target.value})}/><TextInput label="Date" type="date" required value={newDrive.date} onChange={event => setNewDrive({...newDrive,date:event.target.value})}/><SelectInput label="Mode" value={newDrive.mode} onChange={event => setNewDrive({...newDrive,mode:event.target.value})} options={["On Campus","Off Campus","Virtual"].map(value=>({value,label:value}))}/><TextInput label="Apply URL" type="url" value={newDrive.apply_url} onChange={event => setNewDrive({...newDrive,apply_url:event.target.value})}/><TextInput label="Required skills (comma separated)" value={newDrive.required_skills} onChange={event => setNewDrive({...newDrive,required_skills:event.target.value})}/><div className="md:col-span-3">{adminError && <p className="mb-2 text-xs text-rose-700">{adminError}</p>}<Button type="submit">Add placement drive</Button></div></form></Card>}
-    {loading && <Loading label="Loading placement drives..."/>}{error && <ErrorState message={error} onRetry={reload}/>}
-    {data && <>{data.sample_note && <p className="mb-4 rounded-xl bg-amber-50 p-3 text-xs text-amber-800">{data.sample_note}</p>}{data.drives?.length ? <div className="grid gap-4 xl:grid-cols-2">{data.drives.map(drive => <Card key={drive.id} className="relative overflow-hidden"><div className="absolute right-5 top-5"><SkillChip tone={drive.match_percent >= 70 ? "matched" : "weak"}>{Math.min(99, Number(drive.match_percent) || 0)}% estimated match</SkillChip></div><div className="flex gap-3"><span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-violet-50 text-violet-700"><BriefcaseBusiness size={20}/></span><div className="pr-20"><h3 className="font-bold">{drive.company}</h3><p className="mt-1 text-xs text-slate-500">{drive.role}</p></div></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-500"><span><strong className="text-slate-700">Eligibility</strong><br/>{drive.eligibility || "See application details"}</span><span><strong className="text-slate-700">Package</strong><br/>{drive.package_lpa || "Not specified"}</span><span><strong className="text-slate-700">Date</strong><br/>{drive.date}</span><span><strong className="text-slate-700">Mode</strong><br/>{drive.mode}</span></div>{drive.is_sample && <p className="mt-3 text-[10px] text-amber-700">Sample listing — verify before applying.</p>}<div className="mt-4 flex gap-2"><Button onClick={() => apply(drive)}>{drive.applied ? "Interest saved" : "Save interest"}<ArrowRight size={14}/></Button>{drive.apply_url && <a className="button-secondary inline-flex items-center gap-2 rounded-xl border px-4 text-xs font-semibold" href={drive.apply_url} target="_blank" rel="noreferrer">Apply externally</a>}</div></Card>)}</div> : <EmptyState icon={CalendarDays} title={filter === "All" ? "No drives yet" : "No drives in this filter"} description={filter === "All" ? "Add your first opportunity to get started." : "Try another mode or check back later."} action={filter === "All" ? <Button variant="secondary" onClick={() => setShowAdmin(true)}>Add your first opportunity</Button> : null}/>}</>}
-  </>;
-}
 
-function DocumentsPage() {
-  const { data, loading, error, reload } = useResource(() => api("/documents"));
-  const { notify } = useApp();
-  const [compare, setCompare] = useState([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState("");
-  const upload = async file => {
-    if (!file || !/\.(pdf|docx)$/i.test(file.name)) return setUploadError("Choose a PDF or DOCX file.");
-    const form = new FormData(); form.append("document", file);
-    setUploading(true); setUploadError("");
-    try { await api("/documents", { method:"POST", body:form }); notify("Resume version saved."); reload(); }
-    catch (failure) { setUploadError(failure.message); }
-    finally { setUploading(false); }
-  };
-  const deleteDocument = async id => {
-    if (!confirm("Delete this uploaded resume version?")) return;
-    try { await api(`/documents/${id}`, { method:"DELETE" }); reload(); notify("Resume version deleted."); }
-    catch (failure) { setUploadError(failure.message); }
-  };
-  const download = async item => {
-    try {
-      const response = await api(`/documents/${item.id}/download`, { raw:true });
-      const blob = await response.blob(); const url = URL.createObjectURL(blob);
-      const link = document.createElement("a"); link.href=url; link.download=item.filename; link.click(); URL.revokeObjectURL(url);
-    } catch (failure) { setUploadError(failure.message); }
-  };
-  const comparison = useResource(async () => compare.length === 2 ? api(`/documents/compare?first=${compare[0]}&second=${compare[1]}`) : null, [compare.join(",")]);
-  return <>
-    <PageTitle title="Documents" subtitle="Keep your resume versions together and compare analysis scores."/>
-    <Card className="mb-5"><div className="flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-bold">Resume versions</h3><p className="mt-1 text-xs text-slate-500">Private to your signed-in account. Stored in the app database.</p></div><label className="button-primary inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-xl bg-violet-600 px-4 text-xs font-bold text-white">{uploading ? <LoaderCircle className="animate-spin" size={15}/> : <Upload size={15}/>}Upload version<input className="hidden" type="file" accept=".pdf,.docx" onChange={event => upload(event.target.files?.[0])}/></label></div>{uploadError && <div className="mt-3"><ErrorState message={uploadError}/></div>}</Card>
-    {loading && <Loading/>}{error && <ErrorState message={error} onRetry={reload}/>}
-    {data && <Card>{data.documents?.length ? <div className="divide-y divide-slate-100">{data.documents.map(item => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 py-4"><div className="flex min-w-0 items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-violet-50 text-violet-600"><FileText size={18}/></span><div className="min-w-0"><strong className="block truncate text-sm">{item.filename}</strong><span className="text-[11px] text-slate-400">{new Date(item.created_at).toLocaleString()} · Score {item.resume_score ?? "not analyzed"}</span></div></div><div className="flex items-center gap-2"><label className="flex items-center gap-1 text-[10px] text-slate-500"><input type="checkbox" checked={compare.includes(item.id)} onChange={event => setCompare(previous => event.target.checked ? [...previous,item.id].slice(-2) : previous.filter(id=>id!==item.id))}/>Compare</label><button onClick={() => download(item)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100" aria-label={`Download ${item.filename}`}><ArrowDownToLine size={17}/></button><button onClick={() => deleteDocument(item.id)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" aria-label={`Delete ${item.filename}`}><Trash2 size={16}/></button></div></div>)}</div> : <EmptyState icon={FileText} title="No resume versions yet" description="Upload a PDF or DOCX to save it to your documents."/ >}</Card>}
-    {compare.length === 2 && comparison.data && <Card className="mt-5"><h3 className="mb-4 font-bold">Version comparison</h3><div className="grid gap-4 sm:grid-cols-2">{comparison.data.versions.map(version => <div key={version.id} className="rounded-xl bg-slate-50 p-4"><p className="text-xs text-slate-500">{version.filename}</p><strong className="mt-1 block text-2xl">{version.resume_score ?? "—"}<span className="text-sm text-slate-400">/100</span></strong></div>)}</div>{comparison.data.score_difference != null && <p className="mt-3 text-xs text-slate-600">Score difference: {comparison.data.score_difference > 0 ? "+" : ""}{comparison.data.score_difference} points</p>}</Card>}
-  </>;
-}
 
 function CertificatesPage() {
   const { data, loading, error, reload } = useResource(() => api("/certificates"));
@@ -1017,28 +907,5 @@ function SettingsPage() {
   </>;
 }
 
-function HelpPage() {
-  const { notify } = useApp();
-  const [category, setCategory] = useState("Feedback");
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const submit = async event => {
-    event.preventDefault(); setError("");
-    try { await api("/feedback", jsonRequest("POST", { category, message })); setMessage(""); notify("Thank you — your feedback was saved."); }
-    catch (failure) { setError(failure.message); }
-  };
-  const faqs = [
-    ["How is my resume score calculated?","The analyzer evaluates detected skills, project signals, impact metrics, structure, and keywords. It is an estimate, not a hiring decision."],
-    ["Are placement listings guaranteed to be current?","Sample listings are clearly marked. Confirm dates, eligibility, and package details with the employer before applying."],
-    ["Is my resume sent to an AI service?","Only when an optional LLM provider is configured. Without that setting, resume analysis runs locally in the app."],
-    ["How do I delete a saved resume?","Open Documents and use the delete button next to the version you want removed."],
-  ];
-  return <>
-    <PageTitle title="Help & support" subtitle="Find answers to common questions or send feedback to the CareerInfinity team."/>
-    <div className="grid gap-5 xl:grid-cols-[1.2fr_.8fr]"><Card><h3 className="mb-4 font-bold">Frequently asked questions</h3><div className="space-y-3">{faqs.map(([question,answer]) => <details key={question} className="rounded-xl border border-slate-100 p-4"><summary className="cursor-pointer text-sm font-semibold text-slate-800">{question}</summary><p className="mt-3 text-xs leading-5 text-slate-500">{answer}</p></details>)}</div></Card>
-      <Card><h3 className="font-bold">Contact & feedback</h3><p className="mb-4 mt-1 text-xs text-slate-500">Tell us what would make your career workspace more useful.</p><form onSubmit={submit} className="space-y-4"><SelectInput label="Topic" value={category} onChange={event => setCategory(event.target.value)} options={["Feedback","Bug report","Account support","Feature request"].map(value=>({value,label:value}))}/><TextArea label="Message" rows={6} required minLength={5} maxLength={3000} value={message} onChange={event => setMessage(event.target.value)}/>{error && <ErrorState message={error}/>}<Button type="submit">Send message</Button></form></Card>
-    </div>
-  </>;
-}
 
 export default App;

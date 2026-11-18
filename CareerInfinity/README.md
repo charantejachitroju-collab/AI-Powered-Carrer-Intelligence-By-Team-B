@@ -66,21 +66,18 @@ demo questions.
 
 ## Dashboard modules
 
-The responsive React Router sidebar includes:
+The responsive React Router sidebar includes these modules in order:
 
-1. Dashboard overview, score, best-fit role, roadmap priorities, drives, and recent activity.
-2. Career Intelligence with computed role compatibility and editable market data.
-3. Roadmap with an editable 34-role catalog, role-specific stages, certification/course links, proof uploads, and per-resource progress.
-4. Resume Analyzer with upload, existing resume score/suggestions, and role matching.
-5. Job Analyzer comparing a job description with the latest saved resume.
-6. Mock Interview with persisted sessions, optional LLM questions/feedback, and a report.
-7. Recommendations for roles, courses, credentials, and projects.
-8. Placement Drives with filters, match estimate, applications, and admin CRUD.
-9. Documents for resume versions, downloads, deletion, and score comparison.
-10. Certificates earned by the account and editable credential recommendations.
-11. Profile, target role, location, notification, and theme settings.
-12. Help/FAQ and persisted feedback.
-13. Notifications with per-account storage, search, category/read filters, sorting, pagination, preferences, 100 sample role/package alerts, and optional live Adzuna job listings.
+1. Dashboard overview, career journey, role match, and recent activity.
+2. My Profile with account and career details.
+3. Career Recommendations with computed role compatibility and market data.
+4. Job Recommendations for roles, learning resources, credentials, and projects.
+5. Learning Path with role-specific stages, course links, proof uploads, and progress.
+6. Resume Analyzer with upload, score suggestions, and role matching.
+7. Interview Preparation with persisted mock sessions, optional LLM feedback, and reports.
+8. Certifications earned by the account and editable credential recommendations.
+9. Notifications with per-account alerts, search, filters, sorting, preferences, live job listings, and application tracking.
+10. Settings for profile, notification, and theme preferences.
 
 The frontend is in `src/` and uses React, Tailwind CSS, Recharts, Lucide icons,
 and React Router. The former `/skills` dashboard URL redirects to Roadmap; the
@@ -131,6 +128,8 @@ The new dashboard endpoints use the same Firebase ID-token verification:
 | `GET /notifications/jobs/provider-status` | Check whether both server-side Adzuna credentials are configured (returns booleans only) |
 | `POST /notifications/jobs/refresh` | Fetch current job listings from Adzuna when configured; otherwise use the public eGig feed |
 | `POST /notifications/sample-jobs/seed` | Add the signed-in user's 100 role-and-package sample alerts once |
+| `POST /notifications/{id}/apply` | Save a job application and its initial Applied status for the signed-in user |
+| `PATCH /notifications/{id}/application` | Advance that user's application one step through review, interview, and result |
 | `PATCH /notifications/{id}/read`, `POST /notifications/read-all` | Mark one or all of the signed-in user's notifications as read |
 | `DELETE /notifications/{id}` | Delete a notification owned by the signed-in user |
 | `GET/PATCH /notifications/preferences` | Read and save the signed-in user's notification preferences |
@@ -164,6 +163,8 @@ Each live card keeps its provider name and original application URL. Adzuna sear
 The existing Job Recommendations page recommends roles, learning resources, and project ideas; it is not a live job feed. Placement drives remain separately managed. The app creates CareerInfinity activity notifications when a resume analysis finishes and when a user saves interest in a drive (which is not an employer application). It does not ingest employer application/interview updates. Email preference is stored, but toggling it does not send email.
 
 `migrations/002_notifications_supabase.sql` is a separate Supabase SQL Editor migration artifact with user-scoped RLS, restrictive read-status updates, indexes, preferences, and Realtime publication membership. It is **not applied or used by this Firebase/SQLite application**. Supabase RLS policies depend on Supabase Auth user UUIDs; connecting them while retaining the current Firebase-only sign-in requires a deliberate identity bridge or migration that preserves per-user security. Do not paste a Supabase service-role key into frontend settings or this repository.
+
+SQLite migration `004_job_applications.sql` stores job applications by Firebase user and notification. Applying a live listing creates an account-scoped status record; the Application updates count and Applications view include these records. Status advances through Applied, In review, Interview, and Result one step at a time.
 
 ## Editable market and learning data
 
