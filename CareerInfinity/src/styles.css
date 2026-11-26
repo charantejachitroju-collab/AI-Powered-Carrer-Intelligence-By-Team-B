@@ -354,8 +354,24 @@ a { color: inherit; text-decoration: none; }
 .settings-option strong { font-size: 14px; }
 .settings-option small { margin-top: 3px; color: var(--muted); font-size: 12px; }
 .settings-actions { display: flex; justify-content: flex-end; margin-top: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+.settings-panel-content { display: grid; gap: 12px; padding: 22px; }
+.settings-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.settings-subsection { margin-top: 10px; padding-top: 20px; border-top: 1px solid var(--line); }
+.settings-panel-content .settings-option { min-height: 70px; }
+.settings-panel-content input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 auto; accent-color: var(--brand); }
+.settings-panel-content input:disabled { opacity: .65; cursor: not-allowed; }
+.password-meter { position: relative; height: 28px; padding-top: 9px; color: var(--muted); font-size: 11px; }
+.password-meter::before, .password-meter span { position: absolute; top: 0; left: 0; height: 4px; border-radius: 999px; }
+.password-meter::before { width: 100%; background: var(--line); content: ""; }
+.password-meter span { z-index: 1; background: var(--success); transition: width 160ms ease; }
+.session-status { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: var(--success); background: color-mix(in srgb, var(--success) 12%, var(--panel)); font-size: 11px; font-weight: 700; }
+.settings-text-link { flex: 0 0 auto; color: var(--brand); font-size: 12px; font-weight: 700; }
+.settings-panel-content :focus-visible { outline: 3px solid color-mix(in srgb, var(--brand) 42%, transparent); outline-offset: 2px; }
 .profile-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
-.profile-avatar { display: grid; width: 64px; height: 64px; flex: 0 0 auto; place-items: center; border-radius: 20px; color: var(--brand-ink); background: linear-gradient(145deg, color-mix(in srgb, var(--brand) 70%, white), var(--brand-strong)); font-family: var(--font-heading); font-size: 27px; font-weight: 700; }
+.settings-avatar-wrap { display: grid; justify-items: center; gap: 8px; }
+.settings-avatar-wrap .ui-button { min-height: 36px; padding: 0 10px; font-size: 11px; }
+.profile-avatar { display: grid; width: 64px; height: 64px; flex: 0 0 auto; overflow: hidden; place-items: center; border-radius: 20px; color: var(--brand-ink); background: linear-gradient(145deg, color-mix(in srgb, var(--brand) 70%, white), var(--brand-strong)); font-family: var(--font-heading); font-size: 27px; font-weight: 700; }
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .profile-hero h2 { margin: 2px 0; font-size: 22px; }
 .profile-hero p { margin: 0; color: var(--muted); font-size: 13px; }
 .profile-kicker { color: var(--brand) !important; font-size: 12px !important; font-weight: 600; }
@@ -411,7 +427,10 @@ a { color: inherit; text-decoration: none; }
   .notification-card .job-details-panel { padding: 12px !important; }
   .settings-card { padding: 0 !important; }
   .settings-tabs { padding-right: 12px; padding-left: 12px; }
-  .settings-card form { padding: 16px; }
+  .settings-panel-content { padding: 16px; }
+  .settings-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .settings-panel-content .sm\:col-span-2 { grid-column: auto; }
+  .settings-subsection .settings-section-heading { grid-column: 1 / -1; }
   .avatar-menu > summary .avatar-circle { width: 34px; height: 34px; }
   .profile-layout { grid-template-columns: minmax(0, 1fr); }
   .profile-strength { width: 100%; margin-left: 82px; }

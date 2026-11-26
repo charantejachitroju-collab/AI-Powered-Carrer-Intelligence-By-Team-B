@@ -3907,15 +3907,29 @@ async def update_settings(
     payload = await request.json()
     allowed = {
         "name", "target_role", "education", "preferred_location",
-        "notifications_enabled", "theme",
+        "mobile_number", "avatar_data_url", "preferences", "notifications_enabled", "theme",
     }
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise HTTPException(status_code=400, detail="Settings contain unsupported fields.")
     if any(
         key in payload and (not isinstance(payload[key], str) or len(payload[key]) > 200)
-        for key in ("name", "target_role", "education", "preferred_location")
+        for key in ("name", "target_role", "education", "preferred_location", "mobile_number")
     ):
         raise HTTPException(status_code=400, detail="Text settings must be 200 characters or fewer.")
+    if "mobile_number" in payload and payload["mobile_number"] and not re.fullmatch(r"[+()\d .-]{7,32}", payload["mobile_number"].strip()):
+        raise HTTPException(status_code=400, detail="Enter a valid mobile number, including country code if needed.")
+    if "avatar_data_url" in payload and payload["avatar_data_url"] and (
+        not isinstance(payload["avatar_data_url"], str)
+        or len(payload["avatar_data_url"]) > 400_000
+        or not re.fullmatch(r"data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]*={0,2}", payload["avatar_data_url"])
+    ):
+        raise HTTPException(status_code=400, detail="Profile pictures must be a small JPEG, PNG, or WebP image.")
+    if "preferences" in payload and (
+        not isinstance(payload["preferences"], dict)
+        or set(payload["preferences"]) - {"career", "courses", "jobs", "interviews", "email", "personalization", "recruiterVisibility"}
+        or any(not isinstance(value, bool) for value in payload["preferences"].values())
+    ):
+        raise HTTPException(status_code=400, detail="Notification and privacy preferences must be boolean values.")
     if "notifications_enabled" in payload and not isinstance(payload["notifications_enabled"], bool):
         raise HTTPException(status_code=400, detail="Notification preference must be true or false.")
     if "theme" in payload and payload["theme"] not in {"light", "dark"}:
@@ -3941,7 +3955,7 @@ async def update_settings(
         settings.update({
             key: value
             for key, value in payload.items()
-            if key in {"preferred_location", "notifications_enabled", "theme"}
+            if key in {"preferred_location", "mobile_number", "avatar_data_url", "preferences", "notifications_enabled", "theme"}
         })
         with connection:
             save_profile(uid, profile, analysis, connection)

@@ -9,7 +9,7 @@ import {
   Sparkles, Target, TrendingUp, Trophy, Upload, UserRound, Users, X,
 } from "lucide-react";
 import { getApps, initializeApp } from "firebase/app";
-import { getAuth, onAuthStateChanged, signOut } from "firebase/auth";
+import { getAuth, onAuthStateChanged, signOut, updateEmail, updatePassword } from "firebase/auth";
 import {
   Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate,
 } from "react-router-dom";
@@ -856,53 +856,113 @@ function CertificatesPage() {
 
 function SettingsPage() {
   const { data, loading, error, reload } = useResource(() => api("/settings"));
-  const { notify, theme, setTheme } = useApp();
+  const { notify, theme, setTheme, user } = useApp();
   const [form, setForm] = useState(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState("profile");
+  const [saving, setSaving] = useState(false);
+  const [email, setEmail] = useState(user.email || "");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const avatarInputRef = useRef(null);
+  const [preferences, setPreferences] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("careerInfinity:settings") || "{}");
+    } catch { return {}; }
+  });
   useEffect(() => {
     if (!data) return;
     setForm(data);
+    if (data.preferences && Object.keys(data.preferences).length) setPreferences(data.preferences);
     if (data.theme && localStorage.getItem("careerInfinity:theme") !== "system") setTheme(data.theme);
   }, [data, setTheme]);
+  const setPreference = (key, value) => setPreferences(current => ({ ...current, [key]: value }));
   const save = async event => {
     event.preventDefault();
+    setSaving(true);
     const payload = {
       name: form.name || "",
       target_role: form.target_role || "",
       education: form.education || "",
       preferred_location: form.preferred_location || "",
+      mobile_number: form.mobile_number || "",
+      avatar_data_url: form.avatar_data_url || "",
+      preferences,
       notifications_enabled: form.notifications_enabled !== false,
       theme: theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme,
     };
-    try { await api("/settings", jsonRequest("PATCH", payload)); notify("Settings saved."); reload(); }
+    try {
+      await api("/settings", jsonRequest("PATCH", payload));
+      localStorage.setItem("careerInfinity:settings", JSON.stringify(preferences));
+      notify("Settings saved.");
+      reload();
+    }
     catch (failure) { notify(`Unable to save settings: ${failure.message}`); }
+    finally { setSaving(false); }
   };
+  const selectAvatar = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { notify("Choose an image file for your profile picture."); return; }
+    if (file.size > 8 * 1024 * 1024) { notify("Choose an image smaller than 8 MB."); return; }
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = document.createElement("canvas");
+      canvas.width = 256; canvas.height = 256;
+      const scale = Math.max(256 / bitmap.width, 256 / bitmap.height);
+      const width = bitmap.width * scale; const height = bitmap.height * scale;
+      canvas.getContext("2d").drawImage(bitmap, (256 - width) / 2, (256 - height) / 2, width, height);
+      bitmap.close();
+      const avatar_data_url = canvas.toDataURL("image/jpeg", 0.82);
+      if (avatar_data_url.length > 400_000) throw new Error("This image could not be resized small enough. Choose another image.");
+      setForm(current => ({ ...current, avatar_data_url }));
+    } catch (failure) { notify(failure.message || "Unable to read that image. Try another file."); }
+  };
+  const saveEmail = async event => {
+    event.preventDefault();
+    try {
+      if (email.trim() !== user.email) await updateEmail(user, email.trim());
+      notify("Email address updated.");
+    } catch (failure) { notify(`Unable to update email: ${failure.message}`); }
+  };
+  const savePassword = async event => {
+    event.preventDefault();
+    if (newPassword.length < 8) { notify("Use at least 8 characters for your new password."); return; }
+    if (newPassword !== confirmPassword) { notify("The passwords do not match."); return; }
+    try {
+      await updatePassword(user, newPassword);
+      setNewPassword(""); setConfirmPassword("");
+      notify("Password updated.");
+    } catch (failure) { notify(`Unable to update password: ${failure.message}`); }
+  };
+  const logout = async () => { await signOut(auth); window.location.assign("/"); };
+  const tabs = [["profile", "Account"], ["security", "Security"], ["notifications", "Notifications"], ["privacy", "Privacy"], ["appearance", "Appearance"]];
+  const Toggle = ({ id, title, description, checked, onChange }) => <label className="settings-option"><span><strong>{title}</strong><small>{description}</small></span><input id={id} type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)}/></label>;
   return <>
-    <PageTitle title="Profile & settings" subtitle="Keep your career details, alerts, and appearance up to date."/>
+    <PageTitle title="Settings" subtitle="Manage your account, security, notifications, and preferences."/>
     {loading && <Loading/>}{error && <ErrorState message={error} onRetry={reload}/>}
     {form && <Card className="settings-card max-w-3xl">
-      <div className="settings-tabs" role="tablist" aria-label="Profile and settings">
-        {[ ["profile", "Profile"], ["notifications", "Notifications"], ["appearance", "Appearance"] ].map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={activeSettingsTab === key} onClick={() => setActiveSettingsTab(key)}>{label}</button>)}
+      <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+        {tabs.map(([key, label]) => <button key={key} type="button" role="tab" id={`settings-tab-${key}`} aria-controls="settings-panel" aria-selected={activeSettingsTab === key} onClick={() => setActiveSettingsTab(key)}>{label}</button>)}
       </div>
-      <form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
-        {activeSettingsTab === "profile" && <>
-          <div className="settings-section-heading sm:col-span-2"><h3>Your profile</h3><p>These details help tailor your career workspace.</p></div>
-          <TextInput label="Name" autoComplete="name" value={form.name || ""} onChange={event => setForm({...form,name:event.target.value})}/>
-          <SelectInput label="Target role" value={form.target_role || ""} onChange={event => setForm({...form,target_role:event.target.value})} options={["",...(form.available_roles || [])].map(value=>({value,label:value || "Choose a role"}))}/>
-          <TextInput label="Preferred location" autoComplete="address-level2" value={form.preferred_location || ""} onChange={event => setForm({...form,preferred_location:event.target.value})}/>
-          <TextInput label="Education" value={form.education || ""} onChange={event => setForm({...form,education:event.target.value})}/>
-        </>}
-        {activeSettingsTab === "notifications" && <>
-          <div className="settings-section-heading sm:col-span-2"><h3>Notification preferences</h3><p>Choose which in-app career updates you want to see.</p></div>
-          <label className="settings-option sm:col-span-2"><span><strong>Placement updates</strong><small>Receive important placement and opportunity alerts in CareerInfinity.</small></span><input type="checkbox" checked={form.notifications_enabled !== false} onChange={event => setForm({...form,notifications_enabled:event.target.checked})}/></label>
-          <p className="sm:col-span-2 text-xs text-slate-500">Email delivery is not connected. This setting controls in-app updates only.</p>
-        </>}
-        {activeSettingsTab === "appearance" && <>
-          <div className="settings-section-heading sm:col-span-2"><h3>Appearance</h3><p>Choose a theme, or follow your device setting.</p></div>
-          <SelectInput label="Theme" value={theme} onChange={event => { setTheme(event.target.value); setForm({...form,theme:event.target.value}); }} options={[{value:"system",label:"System"},{value:"light",label:"Light"},{value:"dark",label:"Dark"}]}/>
-        </>}
-        <div className="settings-actions sm:col-span-2"><Button type="submit">Save changes</Button></div>
-      </form>
+      <div id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${activeSettingsTab}`}>
+        {activeSettingsTab === "profile" && <div className="settings-panel-content">
+          <div className="profile-hero"><div className="settings-avatar-wrap"><div className="profile-avatar" aria-label="Profile picture">{form.avatar_data_url ? <img src={form.avatar_data_url} alt=""/> : (form.name || user.displayName || user.email || "C").split(/\s+/).map(part => part[0]).slice(0, 2).join("").toUpperCase()}</div><Button type="button" variant="secondary" onClick={() => avatarInputRef.current?.click()}><Camera size={15}/>Change photo</Button><input ref={avatarInputRef} className="sr-only" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Choose profile picture" onChange={selectAvatar}/></div><div><p className="profile-kicker">ACCOUNT SETTINGS</p><h2>{form.name || user.displayName || "Your account"}</h2><p>{user.email || "Email not available"}</p></div></div>
+          <form onSubmit={save} className="settings-form-grid"><div className="settings-section-heading sm:col-span-2"><h3>Personal information</h3><p>Keep your career profile details current.</p></div>
+            <TextInput label="Full name" autoComplete="name" value={form.name || ""} onChange={event => setForm({...form,name:event.target.value})}/>
+            <SelectInput label="Target role" value={form.target_role || ""} onChange={event => setForm({...form,target_role:event.target.value})} options={["",...(form.available_roles || [])].map(value=>({value,label:value || "Choose a role"}))}/>
+            <TextInput label="Preferred location" autoComplete="address-level2" value={form.preferred_location || ""} onChange={event => setForm({...form,preferred_location:event.target.value})}/>
+            <TextInput label="Education" value={form.education || ""} onChange={event => setForm({...form,education:event.target.value})}/>
+            <TextInput label="Mobile number" type="tel" autoComplete="tel" placeholder="+91 98765 43210" value={form.mobile_number || ""} onChange={event => setForm({...form,mobile_number:event.target.value})}/>
+            <div className="settings-actions sm:col-span-2"><Button type="submit" loading={saving}>Save profile</Button></div>
+          </form>
+          <form onSubmit={saveEmail} className="settings-form-grid settings-subsection"><div className="settings-section-heading sm:col-span-2"><h3>Email address</h3><p>Used to sign in to your account.</p></div><TextInput label="Email address" type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)}/><div className="settings-actions sm:col-span-2"><Button type="submit" variant="secondary">Update email</Button></div></form>
+        </div>}
+        {activeSettingsTab === "security" && <div className="settings-panel-content"><form onSubmit={savePassword} className="settings-form-grid"><div className="settings-section-heading sm:col-span-2"><h3>Password and sign-in</h3><p>Choose a strong password you do not use elsewhere.</p></div><TextInput label="New password" type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} minLength={8}/><TextInput label="Confirm new password" type="password" autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)}/><div className="password-meter sm:col-span-2" aria-live="polite"><span style={{width: `${newPassword ? Math.min(100, (newPassword.length / 12) * 100) : 0}%`}}/><small>{newPassword ? (newPassword.length < 8 ? "Add more characters" : newPassword.length < 12 ? "Good strength" : "Strong password") : "Use 8 or more characters"}</small></div><div className="settings-actions sm:col-span-2"><Button type="submit">Change password</Button></div></form><div className="settings-option settings-subsection"><span><strong>Current login session</strong><small>This device is signed in as {user.email}. Other sessions are managed by your identity provider.</small></span><span className="session-status">Active</span></div><div className="settings-option"><span><strong>Sign out</strong><small>End your current session on this device.</small></span><Button type="button" variant="secondary" onClick={logout}>Sign out</Button></div></div>}
+        {activeSettingsTab === "notifications" && <form onSubmit={save} className="settings-panel-content"><div className="settings-section-heading"><h3>Notification preferences</h3><p>Choose the career updates you want to receive in the app.</p></div><Toggle title="Career recommendations" description="Updates when new role matches are available." checked={preferences.career !== false} onChange={value => setPreference("career", value)}/><Toggle title="Courses and certifications" description="Learning path, course, and credential updates." checked={preferences.courses !== false} onChange={value => setPreference("courses", value)}/><Toggle title="Internship and job alerts" description="New opportunities that fit your career interests." checked={form.notifications_enabled !== false} onChange={value => { setForm({...form,notifications_enabled:value}); setPreference("jobs",value); }}/><Toggle title="Interview reminders" description="Reminders for interview preparation and upcoming sessions." checked={preferences.interviews !== false} onChange={value => setPreference("interviews", value)}/><Toggle title="Email notifications" description="Email delivery is not connected; this preference is saved to your account." checked={preferences.email !== false} onChange={value => setPreference("email", value)}/><div className="settings-actions"><Button type="submit" loading={saving}>Save preferences</Button></div></form>}
+        {activeSettingsTab === "privacy" && <form onSubmit={save} className="settings-panel-content"><div className="settings-section-heading"><h3>Privacy controls</h3><p>Manage how your career profile is used in this workspace.</p></div><Toggle title="Personalized recommendations" description="Use your profile and activity to tailor career suggestions." checked={preferences.personalization !== false} onChange={value => setPreference("personalization", value)}/><Toggle title="Profile visibility to recruiters" description="Your profile is not currently shared with recruiters through this app." checked={!!preferences.recruiterVisibility} onChange={value => setPreference("recruiterVisibility", value)}/><div className="settings-option"><span><strong>Account data</strong><small>Request help with account or data removal.</small></span><a className="settings-text-link" href="mailto:support@career-infinity.example?subject=Account%20data%20request">Contact support</a></div><div className="settings-actions"><Button type="submit" loading={saving}>Save privacy settings</Button></div></form>}
+        {activeSettingsTab === "appearance" && <form onSubmit={save} className="settings-panel-content"><div className="settings-section-heading"><h3>Appearance</h3><p>Choose a theme, or follow your device setting.</p></div><SelectInput label="Theme" value={theme} onChange={event => { setTheme(event.target.value); setForm({...form,theme:event.target.value}); }} options={[{value:"system",label:"System"},{value:"light",label:"Light"},{value:"dark",label:"Dark"}]}/><div className="settings-actions"><Button type="submit" loading={saving}>Save appearance</Button></div></form>}
+      </div>
     </Card>}
   </>;
 }
